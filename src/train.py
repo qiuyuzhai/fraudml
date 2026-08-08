@@ -1,91 +1,195 @@
 """
-baseline fraud detection training script.
+FraudML — Refactored Baseline Pipeline
 
-使用方式:
-    python src/train.py --data data/raw/sample.csv
+High-level flow:
+    Load → Time Split → Merge Identity → Profile → Clean → Encode → Train → Evaluate
+
+Usage: python src/train.py
+
+Design notes
+------------
+* Time split: sort by TransactionDT, last 20% as validation (no train_test_split).
+* Identity merge happens AFTER split to prevent leakage.
+* Profile & Clean fit on training data only — no validation statistics
+  leak into preprocessing.
+* FeatureRegistry drives encoding via config.yaml; auto_discover finds
+  all FeatureBase subclasses under src.features.
 """
 
-import argparse
+from __future__ import annotations
+
 import os
-import pickle
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+
+import lightgbm as lgb
+
+from src.data import DataLoader, DataProfiler, DataCleaner
+from src.features import FeatureRegistry
 
 
-def load_data(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        print(f"[WARN] 数据文件不存在: {path}")
-        print("[INFO] 生成示例数据用于演示...")
-        rng = np.random.default_rng(42)
-        n = 1000
-        df = pd.DataFrame({
-            "feature_a": rng.normal(0, 1, n),
-            "feature_b": rng.normal(0, 1, n),
-            "feature_c": rng.binomial(1, 0.3, n),
-            "label": rng.binomial(1, 0.1, n),
-        })
-        return df
-    return pd.read_csv(path)
+def compute_ks(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """KS statistic — max |F_pos(prob) - F_neg(prob)|."""
+    sorted_idx = np.argsort(y_prob)
+    sorted_y = y_true[sorted_idx]
+
+    n_pos = (y_true == 1).sum()
+    n_neg = (y_true == 0).sum()
+
+    cum_pos = np.cumsum(sorted_y == 1) / n_pos
+    cum_neg = np.cumsum(sorted_y == 0) / n_neg
+
+    return float(np.max(np.abs(cum_pos - cum_neg)))
 
 
-def preprocess(df: pd.DataFrame, target: str = "label"):
-    y = df[target]
-    X = df.drop(columns=[target])
-    X = pd.get_dummies(X, drop_first=True)
-    return X, y
+def compute_precision_at_top_k(y_true: np.ndarray, y_prob: np.ndarray, k: float = 0.05) -> float:
+    """Precision@TopK% — fraction of positives in the top-k predicted samples."""
+    n = len(y_true)
+    top_n = max(int(n * k), 1)
+    top_idx = np.argsort(y_prob)[-top_n:]
+    return float(y_true[top_idx].mean())
 
 
-def train(X_train, y_train, **kwargs):
-    model = RandomForestClassifier(n_estimators=kwargs.get("n_estimators", 100), random_state=42)
-    model.fit(X_train, y_train)
-    return model
+def main() -> None:
+    print("=" * 60)
+    print(" FraudML — Refactored Baseline Pipeline")
+    print("=" * 60)
 
+    # ── 1. Load ──────────────────────────────────────────────────
+    print("\n[1] Loading data with memory optimization ...")
+    loader = DataLoader()
+    train_txn, train_id = loader.load_train()
+    print(f"    Transaction: {train_txn.shape}")
+    print(f"    Identity:     {train_id.shape}")
 
-def evaluate(model, X_test, y_test):
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
+    # ── 2. Time split (80% train / 20% val) ────────────────────
+    print("\n[2] Time split — last 20% as validation ...")
+    train_txn = train_txn.sort_values("TransactionDT").reset_index(drop=True)
 
-    print("\n=== 模型评估 ===")
-    print(classification_report(y_test, y_pred, digits=4))
-    print(f"ROC-AUC: {roc_auc_score(y_test, y_prob):.4f}")
-    print("混淆矩阵:")
-    print(confusion_matrix(y_test, y_pred))
+    n_total = len(train_txn)
+    n_val = int(n_total * 0.2)
 
+    train_df = train_txn.iloc[:-n_val].copy()
+    val_df = train_txn.iloc[-n_val:].copy()
 
-def main():
-    parser = argparse.ArgumentParser(description="Fraud detection baseline training")
-    parser.add_argument("--data", default="data/raw/sample.csv", help="CSV 数据文件路径")
-    parser.add_argument("--target", default="label", help="目标列名")
-    parser.add_argument("--n-estimators", type=int, default=100, help="随机森林树数量")
-    parser.add_argument("--output", default="src/model.pkl", help="模型保存路径")
-    args = parser.parse_args()
+    print(f"    Train: {len(train_df):>8}  fraud={train_df['isFraud'].mean():.4f}")
+    print(f"    Val:   {len(val_df):>8}  fraud={val_df['isFraud'].mean():.4f}")
 
-    print(f"[INFO] 加载数据: {args.data}")
-    df = load_data(args.data)
-    print(f"[INFO] 数据形状: {df.shape}")
+    # ── 3. Merge Identity AFTER split (no leakage) ─────────────
+    print("\n[3] Merging Identity (post-split, no leakage) ...")
+    train_df = train_df.merge(train_id, on="TransactionID", how="left")
+    val_df = val_df.merge(train_id, on="TransactionID", how="left")
 
-    X, y = preprocess(df, target=args.target)
-    print(f"[INFO] 特征数: {X.shape[1]}, 样本数: {X.shape[0]}")
-    print(f"[INFO] 正样本比例: {y.mean():.4f}")
+    # ── 4. Separate features / target ──────────────────────────
+    drop_cols = ["TransactionID", "isFraud", "TransactionDT"]
+    y_train = train_df["isFraud"].values
+    y_val = val_df["isFraud"].values
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+    X_train = train_df.drop(columns=drop_cols)
+    X_val = val_df.drop(columns=drop_cols)
 
-    print(f"[INFO] 训练集: {X_train.shape[0]}, 测试集: {X_test.shape[0]}")
-    model = train(X_train, y_train, n_estimators=args.n_estimators)
+    print(f"\n[4] Feature matrix: {X_train.shape[1]} columns")
 
-    evaluate(model, X_test, y_test)
+    # ── 5. Profile (train only) ────────────────────────────────
+    print("[5] Profiling training features ...")
+    profiler = DataProfiler()
+    profiler.run(X_train)
+    print("    → reports/feature_profile.csv")
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    with open(args.output, "wb") as f:
-        pickle.dump(model, f)
-    print(f"\n[INFO] 模型已保存: {args.output}")
+    # ── 6. Clean (fit on train, transform both) ────────────────
+    print("[6] Cleaning (Winsorization + missing flags) ...")
+    cleaner = DataCleaner()
+    cleaner.fit(X_train)
+    X_train_clean = cleaner.transform(X_train)
+    X_val_clean = cleaner.transform(X_val)
+    cleaner.save_summary()
+
+    print(f"    Constant cols dropped: {len(cleaner.constant_cols_)}")
+    print(f"    Numeric cols cleaned:  {len(cleaner.numeric_cols_)}")
+    print(f"    Missing-value flags:    {len(cleaner.cols_with_missing_)}")
+    print(f"    Output features:        {X_train_clean.shape[1]}")
+    print("    → reports/cleaning_summary.csv")
+
+    # ── 7. Feature engineering via Registry ────────────────────
+    print("[7] Feature engineering via FeatureRegistry ...")
+    registry = FeatureRegistry()
+    discovered = registry.auto_discover("src.features")
+    print(f"    Discovered: {[c.__name__ for c in discovered]}")
+
+    configured = registry.configure("config.yaml")
+    print(f"    Configured: {configured}")
+
+    X_train_fe = registry.fit_transform_all(X_train_clean)
+    X_val_fe = registry.transform_all(X_val_clean)
+    registry.save_all("artifacts/features")
+    print(f"    Final features: {X_train_fe.shape[1]}")
+
+    # ── 8. Train Logistic Regression ───────────────────────────
+    print("\n[8] Training Logistic Regression ...")
+    lr = LogisticRegression(max_iter=1000, random_state=42)
+    lr.fit(X_train_fe, y_train)
+    y_prob_lr = lr.predict_proba(X_val_fe)[:, 1]
+
+    auc_lr = roc_auc_score(y_val, y_prob_lr)
+    ks_lr = compute_ks(y_val, y_prob_lr)
+    p5_lr = compute_precision_at_top_k(y_val, y_prob_lr)
+
+    # ── 9. Train LightGBM ──────────────────────────────────────
+    print("[9] Training LightGBM (is_unbalance=True) ...")
+    lgb_model = lgb.LGBMClassifier(is_unbalance=True, random_state=42, verbosity=-1)
+    lgb_model.fit(X_train_fe, y_train)
+    y_prob_lgb = lgb_model.predict_proba(X_val_fe)[:, 1]
+
+    auc_lgb = roc_auc_score(y_val, y_prob_lgb)
+    ks_lgb = compute_ks(y_val, y_prob_lgb)
+    p5_lgb = compute_precision_at_top_k(y_val, y_prob_lgb)
+
+    # ── 10. Results ────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(" Validation Set Results")
+    print("=" * 60)
+    print(f"{'Model':<25} {'AUC':>10} {'KS':>10} {'P@5%':>10}")
+    print("-" * 60)
+    print(f"{'Logistic Regression':<25} {auc_lr:>10.4f} {ks_lr:>10.4f} {p5_lr:>10.4f}")
+    print(f"{'LightGBM':<25} {auc_lgb:>10.4f} {ks_lgb:>10.4f} {p5_lgb:>10.4f}")
+    print("=" * 60)
+
+    # ── 11. Save report ─────────────────────────────────────────
+    os.makedirs("reports", exist_ok=True)
+    report_path = "reports/baseline.md"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# Baseline 实验记录 (Refactored Pipeline)\n\n")
+        f.write("## 实验 — 模块化重构 Baseline\n\n")
+        f.write(f"- **日期**: 2026-08-06\n")
+        f.write(f"- **数据**: `data/raw/train_transaction.csv` + `data/raw/train_identity.csv`\n")
+        f.write(f"- **时间切分**: 按 TransactionDT 排序，最后 20% 作为验证集\n")
+        f.write(f"- **Identity 合并**: 切分后分别合并，防止泄漏\n")
+        f.write(f"- **预处理**: DataCleaner (Winsorization + 缺失值标志) + CategoricalEncoder\n")
+        f.write(f"- **特征工程**: FeatureRegistry 驱动，config.yaml 配置执行顺序\n\n")
+        f.write("### 指标\n\n")
+        f.write("| 模型 | AUC | KS | Precision@Top5% |\n")
+        f.write("|------|-----|----|-----------------|\n")
+        f.write(f"| Logistic Regression | {auc_lr:.4f} | {ks_lr:.4f} | {p5_lr:.4f} |\n")
+        f.write(f"| LightGBM | {auc_lgb:.4f} | {ks_lgb:.4f} | {p5_lgb:.4f} |\n\n")
+        f.write("### 流水线步骤\n\n")
+        f.write("1. **Load** — DataLoader 内存优化 (dtype downcast)\n")
+        f.write("2. **Profile** — DataProfiler 统计特征分布 (仅训练集)\n")
+        f.write("3. **Clean** — DataCleaner 常量列删除 + Winsorization + 缺失值/剪辑标志\n")
+        f.write("4. **Encode** — CategoricalEncoder 标签编码 (未见过类别 → -1)\n")
+        f.write("5. **Train** — LogisticRegression + LightGBM(is_unbalance=True)\n\n")
+        f.write("### 防泄漏保证\n\n")
+        f.write("- Identity 表在时间切分后合并\n")
+        f.write("- DataCleaner.fit() 仅在训练集上调用\n")
+        f.write("- CategoricalEncoder.fit() 仅在训练集上调用\n")
+        f.write("- Profile 仅在训练集上计算\n")
+
+    print(f"\n[Done] Results saved to {report_path}")
 
 
 if __name__ == "__main__":
