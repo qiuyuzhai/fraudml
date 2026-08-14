@@ -39,6 +39,9 @@ class AggregationFeature(FeatureBase):
     ``shift(1)`` so the current row never contributes to its own
     aggregated statistics.
 
+    **Stateful** — learns which aggregation columns exist in
+    training data during fit().
+
     Parameters
     ----------
     agg_cols : list of str, optional
@@ -50,6 +53,10 @@ class AggregationFeature(FeatureBase):
     stats : list of str, optional
         Statistics to compute per group.  Default: count, sum, mean, std.
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -67,6 +74,12 @@ class AggregationFeature(FeatureBase):
         ]
         self._stats = stats or _DEFAULT_STATS
 
+    def _get_state(self) -> Dict[str, Any]:
+        return {
+            "_agg_cols": self._agg_cols,
+            "_group_keys": self._group_keys,
+            "_stats": self._stats,
+        }
     def fit(self, df: pd.DataFrame) -> "AggregationFeature":
         self._agg_cols = [c for c in self._agg_cols if c in df.columns]
         self._fitted = True
@@ -101,27 +114,34 @@ class AggregationFeature(FeatureBase):
                     col_name = f"{key_name}_{col}_{stat}"
 
                     if stat == "count":
-                        val = (g.cumcount() + 1).groupby(key_arrays).shift(1).fillna(0)
+                        val = (g.cumcount() + 1).groupby(key_arrays).shift(1).fillna(0).astype(np.int32)
                         s = pd.Series(val.values, index=df.index, dtype=np.int32)
                         new_cols[col_name] = s
 
                     elif stat == "sum":
-                        val = g[col].cumsum().groupby(key_arrays).shift(1).fillna(0)
-                        s = pd.Series(val.values, index=df.index, dtype=np.int32)
+                        val = g[col].cumsum().groupby(key_arrays).shift(1).fillna(0).astype(np.float32)
+                        s = pd.Series(val.values, index=df.index, dtype=np.float32)
                         new_cols[col_name] = s
 
                     elif stat == "mean":
-                        val = g[col].cummean().groupby(key_arrays).shift(1).fillna(0)
+                        cum_sum = g[col].cumsum()
+                        cum_count = g.cumcount().add(1)
+                        safe_div = cum_sum / cum_count.replace(0, 1)
+                        safe_div = safe_div.where(cum_count != 0, 0.0)
+                        val = safe_div.groupby(key_arrays).shift(1).fillna(0).astype(np.float32)
                         s = pd.Series(val.values, index=df.index, dtype=np.float32)
                         new_cols[col_name] = s
 
                     elif stat == "std":
-                        val = g[col].expanding().transform("std").groupby(key_arrays).shift(1).fillna(0)
+                        expanded_std = g[col].expanding().std()
+                        expanded_std = expanded_std.replace([np.inf, -np.inf], np.nan)
+                        val = expanded_std.groupby(key_arrays).shift(1).fillna(0).astype(np.float32)
                         s = pd.Series(val.values, index=df.index, dtype=np.float32)
                         new_cols[col_name] = s
 
         if new_cols:
             new_df = pd.DataFrame(new_cols, index=df.index)
+            new_df = new_df.replace([np.inf, -np.inf], np.nan).fillna(0)
             df = pd.concat([df, new_df], axis=1)
 
         return df

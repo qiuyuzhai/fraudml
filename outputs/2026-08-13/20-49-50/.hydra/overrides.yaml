@@ -1,0 +1,2 @@
+- checkpoint.force_refresh=true
+- model.params.scale_pos_weight=5

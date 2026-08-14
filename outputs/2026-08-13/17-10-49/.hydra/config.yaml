@@ -1,0 +1,84 @@
+name: fraudml_default
+random_seed: 42
+data:
+  val_ratio: 0.2
+  data_dir: data/raw
+features:
+  config_path: config.yaml
+  steps:
+  - CategoricalEncoder
+  - TargetEncoderFeature
+  - TimeFeature
+  - AmountFeature
+  - DeviceFeature
+  - EmailFeature
+  - CardFeature
+  - AddrFeature
+  - HistoryFeature
+  - MissingPatternFeature
+  - AggregationFeature
+  - CrossFeature
+selection:
+  iv_threshold: 0.005
+  iv_bins: 10
+  vif_threshold: 10.0
+  vif_max_iter: 50
+  psi_threshold: 0.25
+model:
+  type: lightgbm
+  params:
+    n_estimators: 500
+    learning_rate: 0.05
+    num_leaves: 63
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    scale_pos_weight: auto
+cv:
+  enabled: false
+  n_splits: 5
+  purge_gap: 0
+calibration:
+  enabled: false
+  method: platt
+  cv_folds: 3
+  n_jobs: -1
+interpretability:
+  enabled: false
+  max_features: 20
+  n_samples: 100
+risk_decision:
+  enabled: false
+  cost_fp: 10.0
+  cost_fn: 500.0
+  medium_threshold: 0.3
+  high_threshold: 0.7
+evaluation:
+  top_k_pct: 0.05
+model_comparison:
+  enabled: false
+  models:
+  - lr
+  - lightgbm
+  metrics:
+  - auc
+  - ks
+  - brier
+  - logloss
+threshold:
+  cost_fp: 10.0
+  cost_fn: 500.0
+monitoring:
+  auc_threshold: 0.7
+output:
+  dir: artifacts
+mlflow:
+  enabled: true
+  experiment_name: fraudml
+  run_name: null
+  tracking_uri: null
+checkpoint:
+  force_refresh: true

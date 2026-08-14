@@ -11,6 +11,7 @@ via :meth:`FeatureRegistry.auto_discover`.
 
 from .base import FeatureBase
 from .registry import FeatureRegistry
+from .feature_catalog import FeatureCatalog
 from .encoding import CategoricalEncoder, TargetEncoderFeature
 from .history_feature import HistoryFeature
 from .missing_pattern_feature import MissingPatternFeature
@@ -26,6 +27,7 @@ from .cross_feature import CrossFeature
 __all__ = [
     "FeatureBase",
     "FeatureRegistry",
+    "FeatureCatalog",
     "CategoricalEncoder",
     "TargetEncoderFeature",
     "HistoryFeature",

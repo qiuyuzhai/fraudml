@@ -41,6 +41,10 @@ class CrossFeature(FeatureBase):
         super().__init__(name=name)
         self._cross_pairs = cross_pairs or self._DEFAULT_PAIRS
 
+    @property
+    def is_stateful(self) -> bool:
+        return False
+    
     @staticmethod
     # 这里是为应对多种可能的字段类型（int, float, str, NaN），统一转换为字符串，方便拼接。
     def _safe_cross_str(s: pd.Series) -> pd.Series:

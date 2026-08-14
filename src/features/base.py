@@ -166,6 +166,19 @@ class FeatureBase(ABC):
     # Metadata — for drift monitoring & interpretability
     # ------------------------------------------------------------------
 
+    @property
+    def is_stateful(self) -> bool:
+        """Whether this feature learns parameters from training data.
+
+        Stateful features MUST be persisted for online inference.
+        Stateless features are pure transforms that can be recreated
+        without training data.
+
+        Override in subclasses that learn parameters (e.g. encoders,
+        target encoding, missing pattern detection).
+        """
+        return False
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         """Return metadata dict for feature drift monitoring.
 

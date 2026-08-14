@@ -32,6 +32,10 @@ class CardFeature(FeatureBase):
     def __init__(self, name: str = "CardFeature") -> None:
         super().__init__(name=name)
 
+    @property
+    def is_stateful(self) -> bool:
+        return False
+    
     def fit(self, df: pd.DataFrame) -> "CardFeature":
         self._fitted = True
         return self

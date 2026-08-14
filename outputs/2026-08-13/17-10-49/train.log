@@ -1,0 +1,16 @@
+[2026-08-13 17:18:43,127][ModelSerializer-2218580873232][INFO] - [Serialize] Saving pipeline artifacts to artifacts\run_20260813_171050_b5692d ...
+[2026-08-13 17:18:44,112][ModelSerializer-2218580873232][INFO] -     Saved train_features.parquet (472432 rows)
+[2026-08-13 17:18:44,323][ModelSerializer-2218580873232][INFO] -     Saved val_features.parquet (118108 rows)
+[2026-08-13 17:18:44,577][ModelSerializer-2218580873232][INFO] -     Saved 6 stateful components to artifacts\run_20260813_171050_b5692d\online_artifacts\stateful_components
+[2026-08-13 17:18:44,693][ModelSerializer-2218580873232][INFO] -     Saved model.joblib
+[2026-08-13 17:18:44,698][ModelSerializer-2218580873232][INFO] -     Saved threshold_optimizer.joblib
+[2026-08-13 17:18:44,702][ModelSerializer-2218580873232][INFO] -     Saved metadata.json
+[2026-08-13 17:18:44,702][ModelSerializer-2218580873232][INFO] - [Serialize] Done. Online artifacts ready for inference.
+[2026-08-13 17:19:54,879][ModelSerializer-2218580873232][INFO] - [Serialize] Saving pipeline artifacts to artifacts\run_20260813_171050_b5692d ...
+[2026-08-13 17:19:55,980][ModelSerializer-2218580873232][INFO] -     Saved train_features.parquet (472432 rows)
+[2026-08-13 17:19:56,226][ModelSerializer-2218580873232][INFO] -     Saved val_features.parquet (118108 rows)
+[2026-08-13 17:19:56,430][ModelSerializer-2218580873232][INFO] -     Saved 6 stateful components to artifacts\run_20260813_171050_b5692d\online_artifacts\stateful_components
+[2026-08-13 17:19:56,500][ModelSerializer-2218580873232][INFO] -     Saved model.joblib
+[2026-08-13 17:19:56,504][ModelSerializer-2218580873232][INFO] -     Saved threshold_optimizer.joblib
+[2026-08-13 17:19:56,508][ModelSerializer-2218580873232][INFO] -     Saved metadata.json
+[2026-08-13 17:19:56,508][ModelSerializer-2218580873232][INFO] - [Serialize] Done. Online artifacts ready for inference.

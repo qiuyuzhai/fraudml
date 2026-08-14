@@ -1,2 +1,13 @@
 feature_steps:
   - CategoricalEncoder
+  - TargetEncoderFeature
+  - TimeFeature
+  - AmountFeature
+  - DeviceFeature
+  - EmailFeature
+  - CardFeature
+  - AddrFeature
+  - HistoryFeature
+  - MissingPatternFeature
+  - AggregationFeature
+  - CrossFeature

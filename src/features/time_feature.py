@@ -18,7 +18,7 @@ from .base import FeatureBase
 class TimeFeature(FeatureBase):
     """Extract time-of-day features from TransactionDT.
 
-    Stateless — fit() is a no-op.
+    **Stateless** — fit() is a no-op.  No parameters learned.
 
     Features:
         - TransactionDT_hour: hour of day (0-23)
@@ -26,6 +26,10 @@ class TimeFeature(FeatureBase):
         - is_midnight_flag: 1 if hour in [0, 6)
         - time_of_day: categorical period (0-5)
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return False
 
     def __init__(self, name: str = "TimeFeature") -> None:
         super().__init__(name=name)

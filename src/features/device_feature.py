@@ -44,7 +44,7 @@ def _hash_mod_bucket(text: str | None, bucket_size: int = 64) -> int:
 class DeviceFeature(FeatureBase):
     """Parse device‑related features.
 
-    Stateless — fit() is a no‑op.
+    **Stateless** — fit() is a no-op.  No parameters learned.
 
     Features list:
         ## OS flags
@@ -92,6 +92,10 @@ class DeviceFeature(FeatureBase):
         ## Completeness flag
         - device_info_missing: 1 if id_* all null AND DeviceInfo null
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return False
 
     def __init__(self, name: str = "DeviceFeature", hash_bucket_size: int = 64) -> None:
         super().__init__(name=name)

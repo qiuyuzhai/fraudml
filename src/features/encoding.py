@@ -28,6 +28,8 @@ class CategoricalEncoder(FeatureBase):
     Unseen categories (in validation / test) are mapped to ``-1``
     so the pipeline never fails on out-of-vocabulary values.
 
+    **Stateful** — learns LabelEncoder mappings from training data.
+
     Parameters
     ----------
     name : str
@@ -40,6 +42,10 @@ class CategoricalEncoder(FeatureBase):
     encoders_ : dict[str, LabelEncoder]
         Fitted encoders keyed by column name.
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return True
 
     def __init__(self, name: str = "CategoricalEncoder") -> None:
         super().__init__(name=name)
@@ -130,6 +136,9 @@ class TargetEncoderFeature(FeatureBase):
     fall back to the global mean to prevent overfitting on tiny
     groups.
 
+    **Stateful** — learns category→smoothed_target_mean mappings
+    from training data.
+
     Anti-target-leakage design:
     - ``fit()`` computes category→encoded_value mapping from
       **training data only** and stores it as a dict.
@@ -152,6 +161,10 @@ class TargetEncoderFeature(FeatureBase):
         Minimum category sample count; below this, use global mean.
     """
 
+    @property
+    def is_stateful(self) -> bool:
+        return True
+
     def __init__(
         self,
         name: str = "TargetEncoderFeature",
@@ -166,6 +179,16 @@ class TargetEncoderFeature(FeatureBase):
         self._smoothing = smoothing
         self._min_samples = min_samples
 
+    def _get_state(self) -> Dict[str, Any]:
+        return {
+            "_target_col": self._target_col,
+            "_encode_cols": self._encode_cols,
+            "_smoothing": self._smoothing,
+            "_min_samples": self._min_samples,
+            "_global_mean": self._global_mean,
+            "_mappings": self._mappings,
+        }
+
     def fit(self, df: pd.DataFrame) -> "TargetEncoderFeature":
         """Learn target encoding from **training data only**.
 
@@ -173,13 +196,18 @@ class TargetEncoderFeature(FeatureBase):
         ----------
         df : pd.DataFrame
             Training DataFrame.  Must contain the target column.
+            Rows where target is NaN are ignored (validation/test rows
+            concatenated for time-series alignment).
 
         Returns
         -------
         self : TargetEncoderFeature
         """
         y = df[self._target_col].astype(float)
-        self._global_mean = float(y.mean())
+        valid_mask = y.notna()
+        y_valid = y[valid_mask]
+
+        self._global_mean = float(y_valid.mean()) if len(y_valid) > 0 else 0.0
 
         self._mappings: Dict[str, Dict[str, float]] = {}
 
@@ -187,9 +215,9 @@ class TargetEncoderFeature(FeatureBase):
             if col not in df.columns:
                 continue
 
-            series = df[col].fillna("missing").astype(str)
+            series = df.loc[valid_mask, col].fillna("missing").astype(str)
             counts = series.value_counts()
-            means = y.groupby(series).mean()
+            means = y_valid.groupby(series).mean()
 
             mapping: Dict[str, float] = {}
             for cat, cnt in counts.items():

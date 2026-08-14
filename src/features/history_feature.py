@@ -27,9 +27,15 @@ class HistoryFeature(FeatureBase):
 
     All groupby computations use shift(1) to prevent look‑ahead leakage.
 
+    **Stateless** — fit() is a no-op.  No parameters learned.
+
     Args:
         window_seconds: Time window in seconds for counting transactions. Default is 3600 (1 hour).
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return False
 
     def __init__(self, name: str = "HistoryFeature", window_seconds: float = 3600.0) -> None:
         super().__init__(name=name)
@@ -48,8 +54,8 @@ class HistoryFeature(FeatureBase):
         if not self._fitted:
             raise RuntimeError(f"{self.name}: not fitted.")
 
-        orig_index = df.index.copy()
         df = df.copy()
+        df["_orig_pos"] = range(len(df)) # 用位置记录原始索引位置
         df = df.sort_values(by=[self._group_col, self._time_col]).reset_index(drop=True)
 
         g = df.groupby(self._group_col, sort=False)
@@ -75,11 +81,17 @@ class HistoryFeature(FeatureBase):
         shifted_amt = g[self._amount_col].shift(1)
         df["cumulative_spend"] = shifted_amt.groupby(df[self._group_col]).cumsum().fillna(0)
 
-        df.index = orig_index
+        # 修改索引为原始索引，保持与目标列对应关系
+        df = df.sort_values("_orig_pos").reset_index(drop=True)
+        df.drop(columns=["_orig_pos"], inplace=True)
+
 
         df["time_since_last_transaction"] = df["time_since_last_transaction"].fillna(0)
         df["cumulative_spend"] = df["cumulative_spend"].fillna(0)
 
+        # Restore the input row order so downstream positional slicing
+        # (e.g. iloc-based train/val splits) still matches the original X/y pairing.
+        # return df.sort_index()
         return df
 
     def get_feature_metadata(self) -> Dict[str, Any]:

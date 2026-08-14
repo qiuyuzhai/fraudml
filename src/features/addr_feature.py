@@ -29,6 +29,10 @@ class AddrFeature(FeatureBase):
     def __init__(self, name: str = "AddrFeature") -> None:
         super().__init__(name=name)
 
+    @property
+    def is_stateful(self) -> bool:
+        return False
+
     def fit(self, df: pd.DataFrame) -> "AddrFeature":
         self._fitted = True
         return self

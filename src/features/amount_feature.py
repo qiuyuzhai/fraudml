@@ -21,12 +21,18 @@ from .base import FeatureBase
 class AmountFeature(FeatureBase):
     """Transaction amount derived features.
 
+    **Stateless** — fit() is a no-op.  No parameters learned.
+
     Features:
         - log_TransactionAmt: log1p-transformed amount
         - is_integer_amount: binary flag (amount == floor(amount))
         - card1_amount_ratio: amount / card1 historical mean (shift-protected)
         - card1_amount_delta: amount - previous tx amount (shift-protected)
     """
+
+    @property
+    def is_stateful(self) -> bool:
+        return False
 
     def __init__(self, name: str = "AmountFeature") -> None:
         super().__init__(name=name)

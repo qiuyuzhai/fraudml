@@ -39,7 +39,7 @@ POPULARITY_EMAIL_DOMAINS = {
 class EmailFeature(FeatureBase):
     """Email-domain derived features.
 
-    Stateless — fit() is a no-op.
+    **Stateless** — fit() is a no-op.  No parameters learned.
 
     Features:
         - email_suffix_domain: extracted domain part (e.g. 'gmail.com')
@@ -51,6 +51,10 @@ class EmailFeature(FeatureBase):
 
     def __init__(self, name: str = "EmailFeature") -> None:
         super().__init__(name=name)
+
+    @property
+    def is_stateful(self) -> bool:
+        return False
 
     def fit(self, df: pd.DataFrame) -> "EmailFeature":
         self._fitted = True
