@@ -101,6 +101,7 @@ class ModelSerializer:
 
         self.logger.info("[Serialize] Done. Online artifacts ready for inference.")
 
+    # 存最终的训练/验证特征快照
     def _save_offline_features(
         self,
         X_train: Optional[pd.DataFrame],
@@ -121,6 +122,7 @@ class ModelSerializer:
         except Exception as e:
             self.logger.warning("    Failed to save offline features: %s", e)
 
+    # 核心状态组件
     def _save_stateful_components(self, pipeline: Any) -> None:
         """Save each stateful component as an independent joblib file.
 
@@ -150,6 +152,7 @@ class ModelSerializer:
 
         self.logger.info("    Saved %d stateful components to %s", saved, self.stateful_dir)
 
+    # 核心推理组件
     def _save_model_and_extras(self, pipeline: Any) -> None:
         """Save model, calibrator, risk engine as independent artifacts."""
         if pipeline.model_ is not None:
@@ -172,6 +175,7 @@ class ModelSerializer:
             joblib.dump(pipeline.shap_explainer_, self.online_dir / "shap_explainer.joblib")
             self.logger.info("    Saved shap_explainer.joblib")
 
+    # 元数据
     def _save_metadata(self, pipeline: Any) -> None:
         """Save pipeline metadata as JSON (for online inference)."""
         meta: Dict[str, Any] = {

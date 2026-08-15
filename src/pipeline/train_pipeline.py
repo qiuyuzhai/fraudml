@@ -112,6 +112,7 @@ class TrainPipeline:
         self.threshold_optimizer_: Optional[ThresholdOptimizer] = None
         self.risk_engine_: Optional[RiskDecisionEngine] = None
         self.shap_explainer_: Optional[SHAPExplainer] = None
+        self.tree_analyzer_: Optional[TreeAnalyzer] = None
         self.model_comparator_: Optional[ModelComparator] = None
         self.metadata_: Dict[str, Any] = {} # 数据总线
 
@@ -277,6 +278,7 @@ class TrainPipeline:
         self._step_threshold_optimization()
         self._step_risk_decision()
         self._step_interpretability()
+        self._step_tree_analysis()
         self._step_model_comparison()
 
         self.save()
@@ -312,6 +314,7 @@ class TrainPipeline:
             raise RuntimeError("No validation data available.")
 
         # 模型输出的0-1间的浮点数概率值
+        # 先校正，然后拿这个数值去算出最佳阈值，然后把模型输出的概率都矫正后去和阈值作比较
         best_threshold = None
         if self.threshold_optimizer_ is not None:
             best_threshold = self.threshold_optimizer_.best_threshold_
@@ -397,17 +400,22 @@ class TrainPipeline:
             path = self.output_dir / "pipeline.pkl"
         path = Path(path)
 
+        # 训练集/验证集最终特征
         X_train_final = self.metadata_.get("X_train_final")
         X_val_final = self.metadata_.get("val_features")
 
+        # 给人看的特征说明书，用于合规性检查
         self._export_feature_catalog()
 
+        # 把训练好的pipeline拆成独立的组件存到online_artifacts/目录下
         self._serializer.serialize_training_outputs(
             pipeline=self,
             X_train=X_train_final,
             X_val=X_val_final,
         )
 
+        # 把训练好的所有组件打包成一个字典，用于全量依赖场景（如离线复训）
+        # 是个兜底方案，用于在没有online_artifacts/目录的情况下，也能加载到所有组件
         state = {
             "cleaner": self.cleaner_,
             "registry": self.registry_,
@@ -421,6 +429,7 @@ class TrainPipeline:
             "threshold_optimizer": self.threshold_optimizer_,
             "risk_engine": self.risk_engine_,
             "shap_explainer": self.shap_explainer_,
+            "tree_analyzer": self.tree_analyzer_,
             "model_comparator": self.model_comparator_,
             "metadata": self.metadata_,
             "cfg": self.cfg,
@@ -492,6 +501,7 @@ class TrainPipeline:
         return (y_prob >= threshold).astype(int)
 
     @classmethod
+    # 加载pipeline.pkl全量组件，用于离线复现训练效果
     def load(cls, path: str | Path) -> "TrainPipeline":
         """Load a previously saved pipeline.
 
@@ -530,7 +540,7 @@ class TrainPipeline:
 
         pipeline = cls(state["cfg"])
 
-        # --- 修复: 加载时重置路径，指向原 artifact 目录 ---
+        # --- 修复: 加载时重置路径，这样不管用户在哪个目录调用Load，都能指向原 artifact 目录 ---
         resolved_path = path if path.is_dir() else path.parent
         pipeline.output_dir = resolved_path
         pipeline._checkpoint_dir = resolved_path / "checkpoints"
@@ -550,6 +560,7 @@ class TrainPipeline:
         pipeline.threshold_optimizer_ = state["threshold_optimizer"]
         pipeline.risk_engine_ = state.get("risk_engine")
         pipeline.shap_explainer_ = state.get("shap_explainer")
+        pipeline.tree_analyzer_ = state.get("tree_analyzer")
         pipeline.model_comparator_ = state.get("model_comparator")
         pipeline.metadata_ = state["metadata"]
         pipeline.random_seed = state.get("random_seed", 42)
@@ -559,6 +570,7 @@ class TrainPipeline:
 
         return pipeline
 
+    # 加载online_artifacts/目录下的核心组件们，用于线上部署，实时预测，轻量快速
     @classmethod
     def _load_from_structured(cls, artifact_dir: Path) -> "TrainPipeline":
         """Load pipeline from the structured artifact layout.
@@ -618,7 +630,8 @@ class TrainPipeline:
     # ------------------------------------------------------------------
     # Pipeline steps
     # ------------------------------------------------------------------
-
+    
+    # 加载数据后，先把交易数据按照时间排序，再左并身份数据，防止时间穿越式数据泄露
     def _step_load(self) -> None:
         self.logger.info("[1] Loading data ...")
         try:
@@ -683,7 +696,7 @@ class TrainPipeline:
         except Exception as e:
             self.logger.error("Step 'merge_identity' failed: %s", e)
             raise
-
+    
     def _step_profile(self) -> None:
         self.logger.info("[4] Profiling training features ...")
         try:
@@ -728,6 +741,7 @@ class TrainPipeline:
             self.logger.error("Step 'clean' failed: %s", e)
             raise
 
+    # 把清洗后的 train/val 特征合并起来跑特征工程，再按原顺序拆回去，核心难点是「合并-排序-拆分过程中索引不能乱」
     def _step_encode_features(self) -> None:
         self.logger.info("[6] Feature engineering ...")
         try:
@@ -737,7 +751,7 @@ class TrainPipeline:
             sel_cfg = self.cfg.get("selection", {})
             target_col = sel_cfg.get("target_col", "isFraud")
 
-            X_train_clean[target_col] = self.metadata_["y_train"]
+            X_train_clean[target_col] = self.metadata_["y_train"] # 贴标签，索引对齐
 
             feature_cfg = self.cfg.get("features", {})
             config_path = feature_cfg.get("config_path", "config.yaml")
@@ -792,16 +806,16 @@ class TrainPipeline:
             for col in X_val_clean.select_dtypes(include="int64").columns:
                 X_val_clean[col] = X_val_clean[col].astype(np.int32)
 
-            # --- 重要: 保留原始索引(才能对应上目标列) ---
+            # --- 重要: 按照位置拆分而不是索引，确保 train/val 分割正确 ---
             n_train = len(X_train_clean)
             n_val = len(X_val_clean)
 
-            combined = pd.concat([X_train_clean, X_val_clean])
+            combined = pd.concat([X_train_clean, X_val_clean]) 
             combined = combined.sort_values("TransactionDT").reset_index(drop=True)
 
             combined_fe = self.registry_.fit_transform_all(combined)
 
-            # 防御断言：确保特征工程没有改变 train/val 的物理边界
+            # 防御断言：确保特征工程没有改变 train/val 的物理边界（比如去重后导致验证集的一行数据跑到训练集了）
             if "TransactionID" in combined_fe.columns:
                 train_id_set = set(X_train_clean["TransactionID"].unique())
                 fe_train_ids = set(combined_fe.iloc[:n_train]["TransactionID"].unique())
@@ -820,9 +834,6 @@ class TrainPipeline:
 
             X_train_fe = combined_fe.iloc[:n_train].copy()
             X_val_fe = combined_fe.iloc[n_train:].copy()
-
-
-
 
             self.metadata_["X_train_fe"] = X_train_fe
             self.metadata_["X_val_fe"] = X_val_fe
@@ -853,7 +864,7 @@ class TrainPipeline:
                 X_train_fe[target_col] = y_train
 
             self.iv_selector_.fit(X_train_fe)
-            X_train_fe = X_train_fe.drop(columns=[target_col])
+            X_train_fe = X_train_fe.drop(columns=[target_col]) # 必须删除目标列，否则模型100%过拟合标签
 
             X_train_sel = self.iv_selector_.transform(X_train_fe)
             X_val_sel = self.iv_selector_.transform(self.metadata_["X_val_fe"])
@@ -872,7 +883,7 @@ class TrainPipeline:
             tree_models = ("lightgbm", "xgboost", "catboost")
             if model_type in tree_models:
                 self.logger.info("    Tree model detected — skipping VIF (tree models handle collinearity natively)")
-                self.vif_filter_ = None
+                self.vif_filter_ = None # 树模型跳过VIF
                 X_train_final = X_train_sel.copy()
                 X_val_final = X_val_sel.copy()
                 self.selected_features_ = list(X_train_final.columns)
@@ -893,6 +904,7 @@ class TrainPipeline:
                 self.logger.info(
                     "    VIF removed:  %d features", len(self.vif_filter_.removed_features_)
                 )
+                self.logger.info(" IV retained: %d features — 请检查IV阈值是否过高", len(self.iv_selector_.retained_features_))
 
             self.metadata_["X_train_final"] = X_train_final
             self.metadata_["val_features"] = X_val_final
@@ -901,6 +913,7 @@ class TrainPipeline:
             psi_monitor = PSIMonitor(threshold=sel_cfg.get("psi_threshold", 0.25))
             psi_monitor.fit(X_train_final, X_val_final, features=self.selected_features_)
             self.metadata_["psi_report"] = psi_monitor.get_drift_report()
+            assert list(X_train_final.columns) == list(X_val_final.columns), "训练/验证特征列顺序不一致！"
 
             self._export_feature_selection_reports()
         except Exception as e:
@@ -1058,11 +1071,30 @@ class TrainPipeline:
         if isinstance(pos_weight_raw, str) and pos_weight_raw.lower() == "auto":
             neg = float((y == 0).sum())
             pos = float((y == 1).sum())
-            pos_weight = neg / max(pos, 1.0)
-            self.logger.info(
-                "    scale_pos_weight: %.2f (neg=%.0f, pos=%.0f)",
-                pos_weight, neg, pos
-            )
+
+            cost_fp = None
+            cost_fn = None
+            risk_cfg = self.cfg.get("risk_decision", {})
+            threshold_cfg = self.cfg.get("threshold", {})
+            if risk_cfg.get("enabled", False):
+                cost_fp = float(risk_cfg.get("cost_fp", 10.0))
+                cost_fn = float(risk_cfg.get("cost_fn", 500.0))
+            elif threshold_cfg:
+                cost_fp = float(threshold_cfg.get("cost_fp", 10.0))
+                cost_fn = float(threshold_cfg.get("cost_fn", 500.0))
+
+            if cost_fp is not None and cost_fn is not None and cost_fn > cost_fp:
+                pos_weight = cost_fn / max(cost_fp, 1e-6)
+                self.logger.info(
+                    "    scale_pos_weight: %.2f (cost-based, cost_fn=%.1f / cost_fp=%.1f, neg=%.0f, pos=%.0f)",
+                    pos_weight, cost_fn, cost_fp, neg, pos
+                )
+            else:
+                pos_weight = neg / max(pos, 1.0)
+                self.logger.info(
+                    "    scale_pos_weight: %.2f (class-ratio fallback, neg=%.0f, pos=%.0f)",
+                    pos_weight, neg, pos
+                )
         else:
             pos_weight = float(pos_weight_raw)
             self.logger.info(
@@ -1368,6 +1400,57 @@ class TrainPipeline:
         except Exception as e:
             self.logger.warning("[Interpretability] Failed: %s. Continuing without SHAP.", e)
             self.shap_explainer_ = None
+
+    def _step_tree_analysis(self) -> None:
+        tree_cfg = self.cfg.get("tree_analysis", {})
+        enabled = tree_cfg.get("enabled", False)
+
+        if not enabled or self.model_ is None:
+            if not enabled:
+                self.logger.info("[TreeAnalysis] Skipped: tree analysis disabled.")
+            return
+
+        self.logger.info("[TreeAnalysis] Structure-level tree model analysis ...")
+        try:
+            catalog = self.metadata_.get("feature_catalog")
+            self.tree_analyzer_ = TreeAnalyzer(
+                model=self.model_,
+                feature_names=self.selected_features_,
+                feature_catalog=catalog,
+            )
+
+            self.logger.info("    %s", self.tree_analyzer_.summary())
+
+            rules_df = self.tree_analyzer_.extract_rules(
+                max_rules_per_tree=tree_cfg.get("max_rules_per_tree", 5),
+            )
+            self.metadata_["tree_rules"] = rules_df
+
+            depth_df = self.tree_analyzer_.analyze_depth()
+            self.metadata_["feature_depth"] = depth_df
+
+            inter_df = self.tree_analyzer_.mine_interactions(
+                min_paths=tree_cfg.get("min_paths", 10),
+            )
+            self.metadata_["feature_interactions"] = inter_df
+
+            reports_dir = self.output_dir / "reports"
+            export_paths = self.tree_analyzer_.export(
+                output_dir=reports_dir,
+                run_prefix=self._run_id,
+            )
+
+            self.logger.info("    Tree analysis exported: %s", export_paths)
+
+            if self._mlflow:
+                self._mlflow.log_metrics({
+                    "tree_rules_extracted": float(len(rules_df)),
+                    "tree_interactions_found": float(len(inter_df)),
+                })
+
+        except Exception as e:
+            self.logger.warning("[TreeAnalysis] Failed: %s. Continuing.", e)
+            self.tree_analyzer_ = None
 
     def _step_model_comparison(self) -> None:
         comp_cfg = self.cfg.get("model_comparison", {})

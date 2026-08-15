@@ -1,6 +1,8 @@
 """
 FeatureCatalog — Centralized feature metadata management.
 
+所有特征的户口本;类似Feast的FeatureCatalog
+
 Collects metadata from all feature engineering steps and exports
 a unified catalog for Feast-compatible feature registration.
 

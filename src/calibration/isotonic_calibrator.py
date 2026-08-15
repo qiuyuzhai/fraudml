@@ -1,6 +1,9 @@
 """
 IsotonicCalibrator — Isotonic regression calibration.
 
+把模型输出的不靠谱的原始概率当「输入」,把真实的0/1欺诈标签对应的客观概率当「正确答案」,
+训练出一个修正规则——把所有原始概率映射成「真实可信的概率」，而且绝对不打乱原始概率的高低排序
+
 Non-parametric calibration that learns a monotonic mapping from
 raw scores to calibrated probabilities. More flexible than Platt
 scaling but requires more data. 容易过拟合,所以数据量一定要够

@@ -55,7 +55,7 @@ class HistoryFeature(FeatureBase):
             raise RuntimeError(f"{self.name}: not fitted.")
 
         df = df.copy()
-        df["_orig_pos"] = range(len(df)) # 用位置记录原始索引位置
+        df["_orig_pos"] = range(len(df)) # 用位置记录原始索引位置;明确记录「当前行在第几位」
         df = df.sort_values(by=[self._group_col, self._time_col]).reset_index(drop=True)
 
         g = df.groupby(self._group_col, sort=False)
@@ -82,7 +82,7 @@ class HistoryFeature(FeatureBase):
         df["cumulative_spend"] = shifted_amt.groupby(df[self._group_col]).cumsum().fillna(0)
 
         # 修改索引为原始索引，保持与目标列对应关系
-        df = df.sort_values("_orig_pos").reset_index(drop=True)
+        df = df.sort_values("_orig_pos").reset_index(drop=True) # 按记录的位置回去
         df.drop(columns=["_orig_pos"], inplace=True)
 
 

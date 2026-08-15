@@ -66,6 +66,11 @@ interpretability:
   max_features: 20
   n_samples: 100
 
+tree_analysis:
+  enabled: true
+  max_rules_per_tree: 5
+  min_paths: 10
+
 risk_decision:
   enabled: false
   cost_fp: 10.0
