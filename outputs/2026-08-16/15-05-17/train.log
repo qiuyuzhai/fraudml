@@ -1,0 +1,21 @@
+[2026-08-16 15:13:35,593][shap][WARNING] - Background dataset has 472432 samples but max_samples=100. Subsampling to 100 samples for SHAP value computation. To use all samples, set max_samples=472432 when initializing the masker.
+[2026-08-16 15:16:00,642][ModelSerializer-3168746891184][INFO] - [Serialize] Saving pipeline artifacts to artifacts\run_20260816_150517_94c085 ...
+[2026-08-16 15:16:05,173][ModelSerializer-3168746891184][INFO] -     Saved train_features.parquet (472432 rows)
+[2026-08-16 15:16:06,540][ModelSerializer-3168746891184][INFO] -     Saved val_features.parquet (118108 rows)
+[2026-08-16 15:16:06,777][ModelSerializer-3168746891184][INFO] -     Saved 6 stateful components to artifacts\run_20260816_150517_94c085\online_artifacts\stateful_components
+[2026-08-16 15:16:06,839][ModelSerializer-3168746891184][INFO] -     Saved model.joblib
+[2026-08-16 15:16:06,841][ModelSerializer-3168746891184][INFO] -     Saved risk_engine.joblib
+[2026-08-16 15:16:06,843][ModelSerializer-3168746891184][INFO] -     Saved threshold_optimizer.joblib
+[2026-08-16 15:16:07,126][ModelSerializer-3168746891184][INFO] -     Saved shap_explainer.joblib
+[2026-08-16 15:16:07,130][ModelSerializer-3168746891184][INFO] -     Saved metadata.json
+[2026-08-16 15:16:07,130][ModelSerializer-3168746891184][INFO] - [Serialize] Done. Online artifacts ready for inference.
+[2026-08-16 15:17:04,478][ModelSerializer-3168746891184][INFO] - [Serialize] Saving pipeline artifacts to artifacts\run_20260816_150517_94c085 ...
+[2026-08-16 15:17:09,197][ModelSerializer-3168746891184][INFO] -     Saved train_features.parquet (472432 rows)
+[2026-08-16 15:17:10,523][ModelSerializer-3168746891184][INFO] -     Saved val_features.parquet (118108 rows)
+[2026-08-16 15:17:10,699][ModelSerializer-3168746891184][INFO] -     Saved 6 stateful components to artifacts\run_20260816_150517_94c085\online_artifacts\stateful_components
+[2026-08-16 15:17:10,762][ModelSerializer-3168746891184][INFO] -     Saved model.joblib
+[2026-08-16 15:17:10,764][ModelSerializer-3168746891184][INFO] -     Saved risk_engine.joblib
+[2026-08-16 15:17:10,766][ModelSerializer-3168746891184][INFO] -     Saved threshold_optimizer.joblib
+[2026-08-16 15:17:11,018][ModelSerializer-3168746891184][INFO] -     Saved shap_explainer.joblib
+[2026-08-16 15:17:11,021][ModelSerializer-3168746891184][INFO] -     Saved metadata.json
+[2026-08-16 15:17:11,021][ModelSerializer-3168746891184][INFO] - [Serialize] Done. Online artifacts ready for inference.

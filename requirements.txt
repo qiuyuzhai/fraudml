@@ -13,3 +13,4 @@ statsmodels>=0.14.0
 scipy>=1.9.0
 joblib>=1.2.0
 xgboost>=1.6.0
+catboost>=2.0.0

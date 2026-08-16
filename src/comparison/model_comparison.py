@@ -9,6 +9,7 @@ Supported models:
 - lightgbm: LightGBM tree-based model
 - xgboost: XGBoost tree-based model (if available)
 - random_forest: Random Forest (if available)
+- catboost: CatBoost gradient boosting (if available)
 
 Supported metrics:
 - auc: ROC-AUC
@@ -52,6 +53,12 @@ try:
 except ImportError:
     _HAS_RF = False
 
+try:
+    from catboost import CatBoostClassifier
+    _HAS_CATBOOST = True
+except ImportError:
+    _HAS_CATBOOST = False
+
 
 class ModelComparator:
     """Multi-model comparison framework.
@@ -60,7 +67,7 @@ class ModelComparator:
     ----------
     model_types : list of str
         Model types to compare. Options: 'lr', 'lightgbm', 'xgboost',
-        'random_forest'.
+        'random_forest', 'catboost'.
     metrics : list of str
         Metrics to compute. Options: 'auc', 'ks', 'brier', 'logloss',
         'pr_auc'.
@@ -198,6 +205,22 @@ class ModelComparator:
                 n_estimators=200,
                 max_depth=10,
                 n_jobs=-1,
+            )
+
+        elif model_type == "catboost":
+            if not _HAS_CATBOOST:
+                return None
+            return CatBoostClassifier(
+                auto_class_weights="Balanced",
+                random_seed=self.random_seed,
+                iterations=300,
+                learning_rate=0.05,
+                depth=6,
+                l2_leaf_reg=3.0,
+                subsample=0.8,
+                colsample_bylevel=0.8,
+                verbose=0,
+                allow_writing_files=False,
             )
 
         return None
