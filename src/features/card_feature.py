@@ -24,7 +24,9 @@ class CardFeature(FeatureBase):
         - card2_missing_flag: 1 if card2 is null
         - card3_missing_flag: 1 if card3 is null
         - card5_missing_flag: 1 if card5 is null
-        - card1_card2: combined 'card1@card2' string
+
+    Note: card1_card2 is intentionally omitted — CrossFeature
+    already generates card1@card2 as part of its cross-pair set.
     """
 
     _CARD_COLS = ["card1", "card2", "card3", "card5"]
@@ -46,22 +48,29 @@ class CardFeature(FeatureBase):
 
         df = df.copy()
 
-        # --- Missing flags ---
         for col in ["card2", "card3", "card5"]:
             if col in df.columns:
                 df[f"{col}_missing_flag"] = df[col].isnull().astype(np.int8)
             else:
                 df[f"{col}_missing_flag"] = np.int8(1)
 
-        # --- Combined card1_card2 ---
-        if "card1" in df.columns and "card2" in df.columns:
-            c1 = df["card1"].fillna("NA").astype(str)
-            c2 = df["card2"].fillna("NA").astype(str)
-            df["card1_card2"] = c1 + "@" + c2
-        else:
-            df["card1_card2"] = "NA@NA"
-
         return df
+
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "CardFeature",
+            "layer": "fraud-domain",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "CardFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- CardFeature",
+        }
 
     def get_feature_metadata(self) -> Dict[str, Any]:
         return {
@@ -69,10 +78,9 @@ class CardFeature(FeatureBase):
                 "card2_missing_flag",
                 "card3_missing_flag",
                 "card5_missing_flag",
-                "card1_card2",
             ],
-            "physical_meaning": "Bank card metadata and composite identifier",
-            "unit": "flag / string",
+            "physical_meaning": "Bank card metadata missing flags",
+            "unit": "flag",
             "depends_on_target": False,
         }
 
@@ -90,13 +98,13 @@ if __name__ == "__main__":
         result = feat.transform(df)
 
         assert "card2_missing_flag" in result.columns
-        assert "card1_card2" in result.columns
+        assert "card3_missing_flag" in result.columns
+        assert "card5_missing_flag" in result.columns
+        assert "card1_card2" not in result.columns
 
         assert result.iloc[0]["card2_missing_flag"] == 0
         assert result.iloc[1]["card2_missing_flag"] == 1
         assert result.iloc[2]["card3_missing_flag"] == 0
-        print(result.iloc[0]["card1_card2"])
-        assert result.iloc[0]["card1_card2"] == "100@1.0" # 因为存在np.nan → pandas自动把整列升级为float64
 
     test_card_basic()
     print("All CardFeature tests passed!")

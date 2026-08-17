@@ -24,7 +24,12 @@ features:
     - EmailFeature
     - CardFeature
     - AddrFeature
-    - HistoryFeature
+    - HistoryFeature:
+      name: "HistoryFeature_multi"
+      window: [600, 3600, 21600, 86400, 604800]
+      stats: ["count", "mean", "std", "min", "max"]
+      agg_cols: ["TransactionAmt"]
+    - VectorFeature
     - MissingPatternFeature
     - AggregationFeature
     - CrossFeature
@@ -62,7 +67,7 @@ calibration:
   n_jobs: -1
 
 interpretability:
-  enabled: false
+  enabled: true
   max_features: 20
   n_samples: 100
 
@@ -70,6 +75,10 @@ tree_analysis:
   enabled: true
   max_rules_per_tree: 5
   min_paths: 10
+  trace:
+    enabled: true
+    n_samples: 3          # 挑几笔高风险样本
+    top_n_trees: 5        # 详细追踪前 N 棵树
 
 risk_decision:
   enabled: false

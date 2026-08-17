@@ -23,6 +23,9 @@ from .card_feature import CardFeature
 from .addr_feature import AddrFeature
 from .aggregation_feature import AggregationFeature
 from .cross_feature import CrossFeature
+from .graph_feature import GraphFeature
+from .velocity_feature import VelocityFeature
+from .sequence_feature import SequenceFeature
 
 __all__ = [
     "FeatureBase",
@@ -40,4 +43,7 @@ __all__ = [
     "AddrFeature",
     "AggregationFeature",
     "CrossFeature",
+    "GraphFeature",
+    "VelocityFeature",
+    "SequenceFeature",
 ]

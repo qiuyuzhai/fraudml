@@ -83,6 +83,22 @@ class AmountFeature(FeatureBase):
         df.drop(columns=["prev_amt"], inplace=True)
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "AmountFeature",
+            "layer": "generic",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "AmountFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- AmountFeature",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         return {
             "feature_names": [

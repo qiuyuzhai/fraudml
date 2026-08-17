@@ -11,6 +11,11 @@
 #   - TreeAnalysis (tree-based customer profiling)
 #   - RiskDecision (multi-level risk engine)
 #   - ModelComparison (multi-model benchmark)
+#
+# Feature pipeline uses three-layer architecture (see config.yaml for details):
+#   Layer 1: Generic (stateless, foundational)
+#   Layer 2: Fraud-Domain (entity-aware, behavioral)
+#   Layer 3: Business-Domain (graph-based, heavy computation)
 
 name: fraudml_full
 
@@ -24,18 +29,57 @@ data:
 features:
   config_path: config.yaml
   steps:
+    # ========== Layer 1: 通用基础特征 (Generic) ==========
+    - TargetEncoderFeature:
+        name: "TargetEncoderFeature_high"
+        smoothing: 50.0
+        min_samples: 10
+        encode_cols: ["card1", "addr1", "P_emaildomain", "card2", "card5"]
+    - TargetEncoderFeature:
+        name: "TargetEncoderFeature_low"
+        smoothing: 200.0
+        min_samples: 30
+        encode_cols: ["card1", "addr1"]
     - CategoricalEncoder
-    - TargetEncoderFeature
     - TimeFeature
     - AmountFeature
+
+    # ========== Layer 2: 欺诈领域特征 (Fraud-Domain) ==========
     - DeviceFeature
     - EmailFeature
     - CardFeature
     - AddrFeature
-    - HistoryFeature
+    - HistoryFeature:
+      name: "HistoryFeature_multi"
+      window: [600, 3600, 21600, 86400, 604800]
+      stats: ["count", "mean", "std", "min", "max"]
+      agg_cols: ["TransactionAmt"]
+    - VectorFeature
     - MissingPatternFeature
     - AggregationFeature
-    - CrossFeature
+    - CrossFeature:
+        name: "CrossFeature_card_addr"
+        cross_pairs:
+          - ["card1", "addr1"]
+          - ["card1", "card2"]
+          - ["card1", "addr2"]
+    - CrossFeature:
+        name: "CrossFeature_email_device"
+        cross_pairs:
+          - ["P_emaildomain", "DeviceType"]
+          - ["P_emaildomain", "id_30"]
+          - ["DeviceType", "id_31"]
+
+    # ========== Layer 3: 业务领域特征 (Business-Domain) ==========
+    - SequenceFeature:
+        model_type: cnn
+        embed_dim: 64
+        max_seq_len: 30
+        epochs: 20
+        batch_size: 512
+        feature_cols: ["TransactionAmt", "dist1", "dist2", "C1", "C2", "C3"]
+        device: auto
+    - GraphFeature
 
 selection:
   iv_threshold: 0.005
@@ -79,7 +123,10 @@ tree_analysis:
   enabled: true
   max_rules_per_tree: 5
   min_paths: 10
-
+  trace:
+    enabled: true
+    n_samples: 3          # 挑几笔高风险样本
+    top_n_trees: 5        # 详细追踪前 N 棵树
 risk_decision:
   enabled: true
   cost_fp: 10.0

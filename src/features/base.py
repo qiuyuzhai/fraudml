@@ -167,6 +167,12 @@ class FeatureBase(ABC):
     # ------------------------------------------------------------------
 
     @property
+    def _col_suffix(self) -> str:
+        if self.name == self.__class__.__name__:
+            return ""
+        return f"_{self.name}"
+
+    @property
     def is_stateful(self) -> bool:
         """Whether this feature learns parameters from training data.
 
@@ -178,6 +184,37 @@ class FeatureBase(ABC):
         target encoding, missing pattern detection).
         """
         return False
+
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return configuration schema for this feature.
+
+        Returns a dict describing all constructor parameters with
+        their types, defaults, and descriptions.  Override in
+        subclasses to document feature-specific parameters.
+
+        Returns
+        -------
+        dict with keys:
+            - class_name: feature class name
+            - layer: architecture layer (generic / fraud-domain / business-domain)
+            - is_stateful: whether the feature learns from training data
+            - parameters: list of param dicts with name, type, default, description
+            - example: example YAML snippet
+        """
+        return {
+            "class_name": self.__class__.__name__,
+            "layer": "unknown",
+            "is_stateful": self.is_stateful,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": self.__class__.__name__,
+                    "description": "Instance name. Leave as class name for single instance; set uniquely for multiple instances.",
+                },
+            ],
+            "example": f"- {self.__class__.__name__}",
+        }
 
     def get_feature_metadata(self) -> Dict[str, Any]:
         """Return metadata dict for feature drift monitoring.

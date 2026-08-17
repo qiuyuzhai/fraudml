@@ -44,9 +44,14 @@ class CrossFeature(FeatureBase):
     @property
     def is_stateful(self) -> bool:
         return False
+
+    @property
+    def _col_suffix(self) -> str:
+        if self.name == self.__class__.__name__:
+            return ""
+        return f"_{self.name}"
     
     @staticmethod
-    # 这里是为应对多种可能的字段类型（int, float, str, NaN），统一转换为字符串，方便拼接。
     def _safe_cross_str(s: pd.Series) -> pd.Series:
         if pd.api.types.is_integer_dtype(s) or pd.api.types.is_float_dtype(s):
             s = s.astype("Int64")
@@ -63,9 +68,10 @@ class CrossFeature(FeatureBase):
             raise RuntimeError(f"{self.name}: not fitted.")
 
         df = df.copy()
+        suffix = self._col_suffix
 
         for col_a, col_b in self._cross_pairs:
-            out_name = f"{col_a}@{col_b}"
+            out_name = f"{col_a}@{col_b}{suffix}"
             if col_a not in df.columns or col_b not in df.columns:
                 continue
             a = self._safe_cross_str(df[col_a])
@@ -73,9 +79,46 @@ class CrossFeature(FeatureBase):
             df[out_name] = a + "@" + b
         return df
 
-    def get_feature_metadata(self) -> Dict[str, Any]:
+    def get_config_schema(self) -> Dict[str, Any]:
         return {
-            "feature_names": [f"{a}@{b}" for a, b in self._cross_pairs],
+            "class_name": "CrossFeature",
+            "layer": "fraud-domain",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "CrossFeature",
+                    "description": "Instance name. Use unique name for multiple cross pair groups.",
+                },
+                {
+                    "name": "cross_pairs",
+                    "type": "list[list[str]]",
+                    "default": [["card1", "addr1"], ["card1", "card2"], ["P_emaildomain", "addr1"]],
+                    "description": "List of column pairs to cross. Each pair is [col_a, col_b].",
+                },
+            ],
+            "example": """# Single instance (default pairs):
+- CrossFeature
+
+# Multiple instances with different pair groups:
+- CrossFeature:
+    name: "CrossFeature_card_addr"
+    cross_pairs:
+      - ["card1", "addr1"]
+      - ["card1", "card2"]
+      - ["card1", "addr2"]
+- CrossFeature:
+    name: "CrossFeature_email_device"
+    cross_pairs:
+      - ["P_emaildomain", "DeviceType"]
+      - ["P_emaildomain", "id_30"]""",
+        }
+
+    def get_feature_metadata(self) -> Dict[str, Any]:
+        suffix = self._col_suffix
+        return {
+            "feature_names": [f"{a}@{b}{suffix}" for a, b in self._cross_pairs],
             "physical_meaning": "Cross-categorical composite identifiers",
             "unit": "string",
             "depends_on_target": False,

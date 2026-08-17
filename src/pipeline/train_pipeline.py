@@ -500,6 +500,75 @@ class TrainPipeline:
 
         return (y_prob >= threshold).astype(int)
 
+    def trace_sample(
+        self,
+        df: pd.DataFrame,
+        sample_index: int = 0,
+        top_n_trees: int = 5,
+    ) -> Dict[str, Any]:
+        """Trace the decision path for a single transaction.
+
+        Useful for answering *"why was this transaction rejected?"*
+        after a prediction has been made.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Raw transaction data (same columns as training input).
+        sample_index : int
+            Row index inside *df* to trace.
+        top_n_trees : int
+            Number of trees to include in the detailed trace.
+
+        Returns
+        -------
+        dict
+            - fraud_prob: final probability
+            - log_odds: raw aggregated log-odds
+            - feature_contributions: ranked list of influential features
+            - summary: human-readable narrative
+            - trace_data: full trace object (all trees, not just top N)
+        """
+        if self.model_ is None:
+            raise RuntimeError("Model not loaded or trained.")
+        if self.tree_analyzer_ is None:
+            raise RuntimeError(
+                "TreeAnalyzer not available. "
+                "Re-run training with tree_analysis.enabled=true to enable "
+                "decision-path tracing."
+            )
+
+        self._validate_input_columns(df)
+
+        row = df.iloc[[sample_index]].copy()
+        df_clean = self.cleaner_.transform(row)
+        df_encoded = self.registry_.transform_all(df_clean)
+        df_selected = self.iv_selector_.transform(df_encoded)
+        if self.vif_filter_ is not None:
+            df_final = self.vif_filter_.transform(df_selected)
+        else:
+            df_final = df_selected
+
+        sample = df_final.iloc[0]
+        result = self.tree_analyzer_.trace(sample, top_n_trees=top_n_trees)
+
+        y_prob_raw = self.model_.predict_proba(df_final)[:, 1][0]
+        if self.calibrator_ is not None and self.calibrator_._fitted:
+            y_prob_cal = self.calibrator_.transform(np.array([y_prob_raw]))[0]
+        else:
+            y_prob_cal = float(y_prob_raw)
+
+        result["raw_prob"] = float(y_prob_raw)
+        result["calibrated_prob"] = float(y_prob_cal)
+
+        if self.risk_engine_ is not None:
+            risk_info = self.risk_engine_.predict(np.array([y_prob_cal]))
+            result["risk_level"] = str(risk_info["risk_levels"][0])
+            result["recommended_action"] = str(risk_info["recommended_actions"][0])
+            result["confidence"] = float(risk_info["confidence"][0])
+
+        return result
+
     @classmethod
     # 加载pipeline.pkl全量组件，用于离线复现训练效果
     def load(cls, path: str | Path) -> "TrainPipeline":
@@ -769,13 +838,19 @@ class TrainPipeline:
                     resolved_path = candidate
                     break
 
-            if resolved_path is not None:
+            override_steps = feature_cfg.get("steps")
+            if override_steps is not None:
+                self.logger.info("    Using feature steps from config override")
+                self.registry_._instances.clear()
+                self.registry_._execution_order = []
+                self.registry_._configure_steps(override_steps)
+            elif resolved_path is not None:
                 self.logger.info("    Using feature config: %s", resolved_path)
                 self.registry_.configure(resolved_path)
             else:
-                default_steps = feature_cfg.get("steps", [
-                    "CategoricalEncoder",
+                default_steps = [
                     "TargetEncoderFeature",
+                    "CategoricalEncoder",
                     "TimeFeature",
                     "AmountFeature",
                     "DeviceFeature",
@@ -783,19 +858,13 @@ class TrainPipeline:
                     "CardFeature",
                     "AddrFeature",
                     "HistoryFeature",
+                    "VelocityFeature",
                     "MissingPatternFeature",
                     "AggregationFeature",
                     "CrossFeature",
-                ])
-                for cls_name in default_steps:
-                    if cls_name in self.registry_._classes:
-                        cls = self.registry_._classes[cls_name]
-                        self.registry_._instances[cls_name] = cls(name=cls_name)
-                        self.registry_._execution_order.append(cls_name)
-                    else:
-                        self.logger.warning(
-                            "    '%s' not discovered — skipping", cls_name
-                        )
+                    "GraphFeature",
+                ]
+                self.registry_._configure_steps(default_steps)
             # --- 没办法，报错内存不够了：Downcast to save memory before combining ---
             for col in X_train_clean.select_dtypes(include="float64").columns:
                 X_train_clean[col] = X_train_clean[col].astype(np.float32)
@@ -1440,17 +1509,115 @@ class TrainPipeline:
                 run_prefix=self._run_id,
             )
 
+            viz_paths = self.tree_analyzer_.visualize(
+                output_dir=reports_dir / "tree_viz",
+                run_prefix=self._run_id,
+                top_k_gain=tree_cfg.get("top_k_gain", 20),
+                top_k_depth=tree_cfg.get("top_k_depth", 15),
+                top_k_inter=tree_cfg.get("top_k_inter", 20),
+            )
+
             self.logger.info("    Tree analysis exported: %s", export_paths)
+            if viz_paths:
+                self.logger.info("    Tree visualizations: %s", viz_paths)
+                self.metadata_["tree_viz_paths"] = {str(k): str(v) for k, v in viz_paths.items()}
+
+            self._run_decision_trace_demos(reports_dir, tree_cfg)
 
             if self._mlflow:
                 self._mlflow.log_metrics({
                     "tree_rules_extracted": float(len(rules_df)),
                     "tree_interactions_found": float(len(inter_df)),
                 })
+                for plot_name, plot_path in viz_paths.items():
+                    try:
+                        self._mlflow.log_artifact(str(plot_path))
+                    except Exception:
+                        pass
 
         except Exception as e:
             self.logger.warning("[TreeAnalysis] Failed: %s. Continuing.", e)
             self.tree_analyzer_ = None
+
+    def _run_decision_trace_demos(
+        self,
+        reports_dir: Path,
+        tree_cfg: Dict[str, Any],
+    ) -> None:
+        trace_cfg = tree_cfg.get("trace", {})
+        enabled = trace_cfg.get("enabled", True)
+        if not enabled or self.tree_analyzer_ is None or self.model_ is None:
+            return
+
+        val_features = self.metadata_.get("val_features")
+        y_val = self.metadata_.get("y_val")
+        if val_features is None:
+            return
+
+        n_demos = trace_cfg.get("n_samples", 3)
+        self.logger.info("[Trace] Decision-path tracing on top %d high-risk validation samples ...", n_demos)
+
+        try:
+            y_prob_raw = self.model_.predict_proba(val_features)[:, 1]
+            if self.calibrator_ is not None and self.calibrator_._fitted:
+                y_prob = self.calibrator_.transform(y_prob_raw)
+            else:
+                y_prob = y_prob_raw
+
+            top_idx = np.argsort(y_prob)[-n_demos:][::-1]
+
+            trace_dir = reports_dir / "decision_traces"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+
+            trace_records: List[Dict[str, Any]] = []
+            for rank, idx in enumerate(top_idx):
+                idx = int(idx)
+                sample = val_features.iloc[idx]
+                trace_result = self.tree_analyzer_.trace(
+                    sample, top_n_trees=trace_cfg.get("top_n_trees", 5)
+                )
+
+                actual_label = int(y_val[idx]) if y_val is not None else -1
+                self.logger.info(
+                    "  #%d (idx=%d, fraud_prob=%.4f, y_true=%d):",
+                    rank + 1, idx, trace_result["fraud_prob"], actual_label,
+                )
+                for line in trace_result["summary"].split("\n")[:20]:
+                    self.logger.info("    %s", line)
+                self.logger.info("    ...")
+
+                trace_records.append({
+                    "rank": rank + 1,
+                    "row_index": idx,
+                    "fraud_prob": trace_result["fraud_prob"],
+                    "log_odds": trace_result["log_odds"],
+                    "y_true": actual_label,
+                    "top_features": [str(f) for f, _ in trace_result["feature_contributions"][:5]],
+                    "n_trees_traced": len(trace_result.get("all_tree_traces", [])),
+                })
+
+                trace_file = trace_dir / f"trace_{rank+1}_idx{idx}.txt"
+                with open(trace_file, "w", encoding="utf-8") as f:
+                    f.write(trace_result["summary"])
+
+                trace_plot_file = trace_dir / f"trace_{rank+1}_idx{idx}_tree0.png"
+                ax = self.tree_analyzer_.plot_trace(sample, tree_idx=0)
+                if ax is not None:
+                    import matplotlib.pyplot as plt
+                    fig = ax.figure
+                    fig.savefig(str(trace_plot_file), dpi=150, bbox_inches="tight")
+                    plt.close(fig)
+
+            if trace_records:
+                pd.DataFrame(trace_records).to_csv(
+                    trace_dir / "trace_summary.csv", index=False
+                )
+                self.logger.info("[Trace] Saved %d trace demo files in %s",
+                                 len(trace_records), trace_dir)
+                self.metadata_["decision_trace_dir"] = str(trace_dir)
+
+        except Exception as e:
+            self.logger.warning("[Trace] Decision trace demo failed: %s", e)
 
     def _step_model_comparison(self) -> None:
         comp_cfg = self.cfg.get("model_comparison", {})

@@ -18,7 +18,7 @@ import importlib
 import inspect
 import pkgutil
 from pathlib import Path
-from typing import Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 import pandas as pd
 import yaml
@@ -97,15 +97,31 @@ class FeatureRegistry:
         """Read a YAML config and instantiate features in order.
 
         The config file must contain a top-level key
-        ``feature_steps`` — a list of class names (strings)
+        ``feature_steps`` — a list specifying feature classes
         in the order they should execute.
 
-        Example YAML::
+        Two formats are supported:
+
+        1. Simple string (backward compatible)::
 
             feature_steps:
-              - DataCleaner
-              - SomeEncoder
-              - SomeScaler
+              - CategoricalEncoder
+              - TimeFeature
+
+        2. Dict with parameters (same class can be instantiated
+           multiple times with different arguments)::
+
+            feature_steps:
+              - CategoricalEncoder
+              - TargetEncoderFeature:
+                  smoothing: 50.0
+                  min_samples: 10
+              - HistoryFeature:
+                  name: "HistoryFeature_1h"
+                  window_seconds: 3600
+              - HistoryFeature:
+                  name: "HistoryFeature_1day"
+                  window_seconds: 86400
 
         Parameters
         ----------
@@ -115,33 +131,91 @@ class FeatureRegistry:
         Returns
         -------
         list[str]
-            Ordered list of feature names (== class names).
+            Ordered list of instance names.
 
         Raises
         ------
         ValueError
-            If a named feature class has not been discovered.
+            If a named feature class has not been discovered or
+            the step format is invalid.
         """
         path = Path(path)
         with open(path) as fh:
             config = yaml.safe_load(fh)
 
-        steps: List[str] = config.get("feature_steps", [])
+        steps: List = config.get("feature_steps", [])
 
         self._instances.clear()
         self._execution_order = []
 
-        for class_name in steps:
-            if class_name not in self._classes:
+        for step in steps:
+            if isinstance(step, str):
+                cls_name = step
+                instance_name = step
+                params: Dict[str, Any] = {}
+            elif isinstance(step, dict):
+                cls_name = list(step.keys())[0]
+                params = step[cls_name] or {}
+                instance_name = params.pop("name", cls_name)
+            else:
+                raise ValueError(f"Invalid step format: {step}")
+
+            if cls_name not in self._classes:
                 raise ValueError(
-                    f"Unknown feature '{class_name}'. "
+                    f"Unknown feature '{cls_name}'. "
                     f"Run auto_discover() first. "
                     f"Discovered: {list(self._classes.keys())}"
                 )
-            cls = self._classes[class_name]
-            instance = cls(name=class_name)
-            self._instances[class_name] = instance
-            self._execution_order.append(class_name)
+            cls = self._classes[cls_name]
+            instance = cls(name=instance_name, **params)
+            self._instances[instance_name] = instance
+            self._execution_order.append(instance_name)
+
+        return list(self._execution_order)
+
+    # ------------------------------------------------------------------
+    # Step configuration (programmatic, for config overrides)
+    # ------------------------------------------------------------------
+
+    def _configure_steps(self, steps: List) -> List[str]:
+        """Instantiate features from a step list (strings or dicts).
+
+        Same logic as :meth:`configure` but accepts a list directly
+        instead of reading from a YAML file.
+
+        Parameters
+        ----------
+        steps : list
+            Step list.  Each element is either a plain string
+            (class name) or a ``{ClassName: {params}}`` dict.
+
+        Returns
+        -------
+        list[str]
+            Ordered list of instance names.
+        """
+        for step in steps:
+            if isinstance(step, str):
+                cls_name = step
+                instance_name = step
+                params: Dict[str, Any] = {}
+            elif isinstance(step, dict):
+                cls_name = list(step.keys())[0]
+                params = step[cls_name] or {}
+                instance_name = params.pop("name", cls_name)
+            else:
+                raise ValueError(f"Invalid step format: {step}")
+
+            if cls_name not in self._classes:
+                raise ValueError(
+                    f"Unknown feature '{cls_name}'. "
+                    f"Run auto_discover() first. "
+                    f"Discovered: {list(self._classes.keys())}"
+                )
+            cls = self._classes[cls_name]
+            instance = cls(name=instance_name, **params)
+            self._instances[instance_name] = instance
+            self._execution_order.append(instance_name)
 
         return list(self._execution_order)
 
@@ -266,8 +340,100 @@ class FeatureRegistry:
         return self
 
     # ------------------------------------------------------------------
-    # Introspection
+    # Introspection / schema discovery
     # ------------------------------------------------------------------
+
+    def get_class_schema(self, class_name: str) -> Dict[str, Any]:
+        """Get the config schema for a discovered feature class.
+
+        Instantiates the class with default arguments (no side-effects)
+        and calls its :meth:`~src.features.base.FeatureBase.get_config_schema`.
+
+        Parameters
+        ----------
+        class_name : str
+            Class name (e.g. ``"HistoryFeature"``).
+
+        Returns
+        -------
+        dict
+            Schema dict from the feature class, or empty dict if the
+            class has not been discovered.
+        """
+        if class_name not in self._classes:
+            return {}
+        cls = self._classes[class_name]
+        try:
+            dummy = cls()
+            return dummy.get_config_schema()
+        except TypeError:
+            return cls.get_config_schema(cls.__name__)
+
+    def print_all_config_schemas(self) -> str:
+        """Print a human-readable summary of every discovered feature's config schema.
+
+        Returns
+        -------
+        str
+            Formatted string that is also printed to stdout.
+        """
+        lines: List[str] = []
+        lines.append("=" * 72)
+        lines.append("  FEATURE CONFIGURATION REFERENCE")
+        lines.append("=" * 72)
+        lines.append("")
+        lines.append("  All discovered feature classes and their configurable parameters.")
+        lines.append("  Use these to compose your config.yaml without reading source code.")
+        lines.append("")
+
+        layer_order = ["generic", "fraud-domain", "business-domain"]
+        layer_labels = {
+            "generic": "Layer 1 - Generic (stateless / lightweight)",
+            "fraud-domain": "Layer 2 - Fraud-Domain (entity-aware)",
+            "business-domain": "Layer 3 - Business-Domain (graph-based, heavy)",
+        }
+
+        for layer in layer_order:
+            features_in_layer = []
+            for cls_name in sorted(self._classes.keys()):
+                schema = self.get_class_schema(cls_name)
+                if schema.get("layer") == layer:
+                    features_in_layer.append((cls_name, schema))
+
+            if not features_in_layer:
+                continue
+
+            lines.append(f"{'─' * 72}")
+            lines.append(f"  {layer_labels.get(layer, layer)}")
+            lines.append(f"{'─' * 72}")
+            lines.append("")
+
+            for cls_name, schema in features_in_layer:
+                lines.append(f"  [{cls_name}]")
+                lines.append(f"    Stateful: {'YES (learns from train data)' if schema.get('is_stateful') else 'NO (stateless)'}")
+                lines.append("")
+
+                params = schema.get("parameters", [])
+                if params:
+                    lines.append("    Parameters:")
+                    for p in params:
+                        lines.append(f"      {p['name']} ({p['type']})")
+                        default_repr = repr(p['default']) if not isinstance(p['default'], str) else p['default']
+                        lines.append(f"        Default: {default_repr}")
+                        lines.append(f"        {p['description']}")
+                        lines.append("")
+
+                example = schema.get("example", "")
+                if example:
+                    lines.append("    Example:")
+                    for el in example.split("\n"):
+                        lines.append(f"      {el}")
+                    lines.append("")
+
+        lines.append("=" * 72)
+        text = "\n".join(lines)
+        print(text)
+        return text
 
     @property
     def features(self) -> Dict[str, FeatureBase]:

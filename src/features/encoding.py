@@ -115,6 +115,22 @@ class CategoricalEncoder(FeatureBase):
             series = series.cat.add_categories("missing")
         return series.fillna("missing").astype(str)
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "CategoricalEncoder",
+            "layer": "generic",
+            "is_stateful": True,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "CategoricalEncoder",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- CategoricalEncoder",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         return {
             "feature_names": self.cat_cols_ if hasattr(self, "cat_cols_") else [],
@@ -164,6 +180,12 @@ class TargetEncoderFeature(FeatureBase):
     @property
     def is_stateful(self) -> bool:
         return True
+
+    @property
+    def _col_suffix(self) -> str:
+        if self.name == self.__class__.__name__:
+            return ""
+        return f"_{self.name}"
 
     def __init__(
         self,
@@ -252,18 +274,73 @@ class TargetEncoderFeature(FeatureBase):
             raise RuntimeError(f"{self.name}: not fitted.")
 
         df = df.copy()
+        suffix = self._col_suffix
 
         for col, mapping in self._mappings.items():
             if col not in df.columns:
                 continue
             series = df[col].fillna("missing").astype(str)
-            df[f"{col}_target_enc"] = series.map(mapping).fillna(self._global_mean).astype(np.float32)
+            df[f"{col}_target_enc{suffix}"] = series.map(mapping).fillna(self._global_mean).astype(np.float32)
 
         return df
 
-    def get_feature_metadata(self) -> Dict[str, Any]:
+    def get_config_schema(self) -> Dict[str, Any]:
         return {
-            "feature_names": [f"{c}_target_enc" for c in self._encode_cols],
+            "class_name": "TargetEncoderFeature",
+            "layer": "generic",
+            "is_stateful": True,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "TargetEncoderFeature",
+                    "description": "Instance name. Use unique name for multiple instances (e.g. 'TargetEncoderFeature_high').",
+                },
+                {
+                    "name": "target_col",
+                    "type": "str",
+                    "default": "isFraud",
+                    "description": "Target column name.",
+                },
+                {
+                    "name": "encode_cols",
+                    "type": "list[str]",
+                    "default": ["card1", "addr1", "P_emaildomain"],
+                    "description": "Categorical columns to target-encode.",
+                },
+                {
+                    "name": "smoothing",
+                    "type": "float",
+                    "default": 100.0,
+                    "description": "Bayesian smoothing factor m. Larger values = more regularization. Typical range: 10-500.",
+                },
+                {
+                    "name": "min_samples",
+                    "type": "int",
+                    "default": 20,
+                    "description": "Min category count below which global mean is used instead of category mean.",
+                },
+            ],
+            "example": """# Single instance (default params):
+- TargetEncoderFeature
+
+# Multiple instances with different configs:
+- TargetEncoderFeature:
+    name: "TargetEncoderFeature_high"
+    smoothing: 50.0
+    min_samples: 10
+    encode_cols: ["card1", "addr1", "P_emaildomain", "card2", "card5"]
+- TargetEncoderFeature:
+    name: "TargetEncoderFeature_low"
+    smoothing: 200.0
+    min_samples: 30
+    encode_cols: ["card1", "addr1"]""",
+        }
+
+    def get_feature_metadata(self) -> Dict[str, Any]:
+        suffix = self._col_suffix
+        return {
+            "feature_names": [f"{c}_target_enc{suffix}" for c in self._encode_cols],
             "physical_meaning": "Bayesian smoothed target mean per category",
             "unit": "probability",
             "depends_on_target": True,

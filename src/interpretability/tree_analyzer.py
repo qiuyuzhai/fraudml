@@ -25,6 +25,21 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    _HAS_MPL = True
+except ImportError:
+    _HAS_MPL = False
+
+try:
+    import networkx as nx
+    _HAS_NX = True
+except ImportError:
+    _HAS_NX = False
+
 
 class TreeAnalyzer:
     """Structure-level analyzer for tree-based models.
@@ -543,6 +558,328 @@ class TreeAnalyzer:
         return df
 
     # ------------------------------------------------------------------
+    # Decision tracing — per-sample "why was this rejected"
+    # ------------------------------------------------------------------
+
+    def trace(
+        self,
+        sample: pd.Series,
+        top_n_trees: int = 5,
+    ) -> Dict[str, Any]:
+        """Trace the exact decision path for a single prediction.
+
+        Walks every tree from root to leaf using the sample's feature
+        values, recording every split condition that was evaluated, and
+        produces a human-readable "why was this transaction flagged".
+
+        Parameters
+        ----------
+        sample : pd.Series
+            A single transaction's feature values.  Index must match
+            ``self.feature_names`` (i.e. the model's input columns).
+        top_n_trees : int
+            Number of trees (sorted by leaf absolute value descending)
+            to include in the detailed step-by-step trace.
+
+        Returns
+        -------
+        dict with keys:
+            - fraud_prob: float — final fraud probability (sigmoid of sum)
+            - log_odds: float — raw aggregated log-odds
+            - feature_contributions: list of (feature, contribution) from
+              each tree's leaf, sorted by abs(contribution)
+            - tree_traces: list of per-tree step-by-step navigations
+            - summary: str — human-readable narrative
+        """
+        if not self._trees:
+            return {"fraud_prob": 0.0, "log_odds": 0.0,
+                    "feature_contributions": [], "tree_traces": [],
+                    "summary": "(no trees)"}
+
+        tree_traces: List[Dict[str, Any]] = []
+        leaf_contributions: List[Tuple[str, float]] = []
+        total_log_odds = 0.0
+
+        for tree_id, tree in enumerate(self._trees):
+            split_feats = tree["split_feature"]
+            thresholds = tree["threshold"]
+            left_children = tree["left_child"]
+            right_children = tree["right_child"]
+            leaf_values = tree["leaf_value"]
+            n = len(split_feats)
+
+            node_idx = 0
+            steps: List[Dict[str, Any]] = []
+            reached_leaf = False
+
+            while node_idx < n and node_idx >= 0:
+                lc = left_children[node_idx]
+                rc = right_children[node_idx]
+
+                if lc < 0 and rc < 0:
+                    leaf_v = float(leaf_values[node_idx]) if node_idx < len(leaf_values) else 0.0
+                    total_log_odds += leaf_v
+                    tree_traces.append({
+                        "tree_id": tree_id,
+                        "leaf_node": node_idx,
+                        "leaf_value": leaf_v,
+                        "steps": steps,
+                    })
+                    leaf_contributions.append((f"tree_{tree_id}", leaf_v))
+                    reached_leaf = True
+                    break
+
+                fi = split_feats[node_idx]
+                fn = self._feat_name(fi)
+                th = float(thresholds[node_idx]) if node_idx < len(thresholds) else 0.0
+
+                feat_val = None
+                try:
+                    feat_val = float(sample.get(fn, sample.get(fi, np.nan)))
+                except (TypeError, ValueError):
+                    feat_val = np.nan
+
+                if np.isnan(feat_val):
+                    feat_val = 0.0
+
+                if feat_val <= th:
+                    direction = "left"
+                    target = lc
+                else:
+                    direction = "right"
+                    target = rc
+
+                steps.append({
+                    "node": node_idx,
+                    "feature": fn,
+                    "threshold": th,
+                    "actual_value": feat_val,
+                    "direction": direction,
+                    "condition": (
+                        f"{fn} <= {self._format_threshold(th)}"
+                        if direction == "left"
+                        else f"{fn} > {self._format_threshold(th)}"
+                    ),
+                })
+
+                node_idx = target
+
+            if not reached_leaf:
+                tree_traces.append({
+                    "tree_id": tree_id,
+                    "leaf_node": -1,
+                    "leaf_value": 0.0,
+                    "steps": steps,
+                })
+
+        fraud_prob = 1.0 / (1.0 + np.exp(-total_log_odds)) if abs(total_log_odds) < 50 else float(total_log_odds > 0)
+
+        leaf_contributions.sort(key=lambda x: abs(x[1]), reverse=True)
+
+        feature_contrib_map: Dict[str, float] = defaultdict(float)
+        for _, lv in leaf_contributions:
+            pass
+
+        important_feats: Dict[str, float] = defaultdict(float)
+        for tt in tree_traces:
+            for step in tt["steps"]:
+                fn = step["feature"]
+                important_feats[fn] += abs(tt["leaf_value"])
+
+        sorted_imp = sorted(important_feats.items(), key=lambda x: x[1], reverse=True)
+
+        narrative_lines = [
+            f"Fraud probability: {fraud_prob:.4f}",
+            f"Total log-odds:    {total_log_odds:.4f}",
+            f"Contributing trees: {len(tree_traces)}",
+            "",
+            "Most influential features (by |leaf_value| accumulated):",
+        ]
+        for feat, imp in sorted_imp[:10]:
+            narrative_lines.append(f"  {feat}: cumulative_leaf_impact={imp:.4f}")
+
+        top_tree_ids = [t["tree_id"] for t in tree_traces[:top_n_trees]]
+
+        narrative_lines.append("")
+        narrative_lines.append(f"--- Step-by-step for top {min(top_n_trees, len(tree_traces))} trees ---")
+        for tt in tree_traces[:top_n_trees]:
+            narrative_lines.append(
+                f"Tree #{tt['tree_id']}: leaf={tt['leaf_node']} "
+                f"(value={tt['leaf_value']:.4f}, prob={1/(1+np.exp(-tt['leaf_value'])) if abs(tt['leaf_value'])<50 else float(tt['leaf_value']>0):.4f})"
+            )
+            for step in tt["steps"]:
+                flag = "***" if step["feature"] in [f for f, _ in sorted_imp[:5]] else "   "
+                narrative_lines.append(
+                    f"  {flag} {step['condition']}  (actual={step['actual_value']:.4f})  → {step['direction']}"
+                )
+
+        return {
+            "fraud_prob": float(fraud_prob),
+            "log_odds": float(total_log_odds),
+            "feature_contributions": sorted_imp,
+            "tree_traces": tree_traces[:top_n_trees],
+            "all_tree_traces": tree_traces,
+            "summary": "\n".join(narrative_lines),
+        }
+
+    def trace_summary(self, sample: pd.Series, top_n_trees: int = 3) -> str:
+        """Convenience wrapper returning just the narrative string."""
+        result = self.trace(sample, top_n_trees=top_n_trees)
+        return result["summary"]
+
+    def plot_trace(
+        self,
+        sample: pd.Series,
+        tree_idx: int = 0,
+        ax: Optional[object] = None,
+    ) -> Optional[object]:
+        """Visualize the decision path through a single tree for one sample.
+
+        The traced path is highlighted in orange; non-taken branches are
+        shown in light gray.  Leaf nodes are color-coded by fraud probability
+        (red = high, green = low).
+
+        Parameters
+        ----------
+        sample : pd.Series
+            Transaction feature values.
+        tree_idx : int
+            Index of the tree to visualize.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on.
+
+        Returns
+        -------
+        matplotlib.axes.Axes or None
+        """
+        if not _HAS_MPL or not self._trees:
+            return None
+
+        if tree_idx >= len(self._trees) or tree_idx < 0:
+            tree_idx = 0
+
+        tree = self._trees[tree_idx]
+        split_feats = tree["split_feature"]
+        thresholds = tree["threshold"]
+        left_children = tree["left_child"]
+        right_children = tree["right_child"]
+        leaf_values = tree["leaf_value"]
+        n = len(split_feats)
+
+        depth_map: Dict[int, int] = {}
+        self._compute_depths(0, 0, left_children, right_children, n, depth_map)
+
+        path_nodes: set = set()
+        path_edges: set = set()
+        node_idx = 0
+        while node_idx < n and node_idx >= 0:
+            path_nodes.add(node_idx)
+            lc = left_children[node_idx]
+            rc = right_children[node_idx]
+            if lc < 0 and rc < 0:
+                break
+            fi = split_feats[node_idx]
+            fn = self._feat_name(fi)
+            th = float(thresholds[node_idx]) if node_idx < len(thresholds) else 0.0
+            try:
+                feat_val = float(sample.get(fn, sample.get(fi, 0)))
+            except (TypeError, ValueError):
+                feat_val = 0.0
+            if feat_val <= th:
+                target = lc
+            else:
+                target = rc
+            if target >= 0:
+                path_edges.add((node_idx, target))
+            node_idx = target
+
+        max_depth = max(depth_map.values()) if depth_map else 0
+        n_levels = max_depth + 1
+
+        fig_width = max(8, 2 ** max_depth * 1.8)
+        fig_height = max(4, n_levels * 1.2)
+        if ax is None:
+            _, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+        ax.set_xlim(-1.2, 1.2)
+        ax.set_ylim(-n_levels - 0.5, 0.5)
+        ax.axis("off")
+
+        positions: Dict[int, Tuple[float, float]] = {}
+        for node_i, d in depth_map.items():
+            leaves_below = self._count_leaves_below(node_i, left_children, right_children, n)
+            total_leaves = self._count_leaves_below(0, left_children, right_children, n) or 1
+            x = (leaves_below / total_leaves) * 2.0 - 1.0
+            y = -d
+            positions[node_i] = (x, y)
+
+        for node_i in range(n):
+            lc = left_children[node_i]
+            rc = right_children[node_i]
+            if lc >= 0 and node_i in positions and lc in positions:
+                x1, y1 = positions[node_i]
+                x2, y2 = positions[lc]
+                is_on_path = (node_i, lc) in path_edges
+                ax.plot([x1, x2], [y1, y2],
+                        color="#e67e22" if is_on_path else "#d5dbdb",
+                        linewidth=2.0 if is_on_path else 0.6,
+                        alpha=0.9 if is_on_path else 0.4)
+            if rc >= 0 and node_i in positions and rc in positions:
+                x1, y1 = positions[node_i]
+                x2, y2 = positions[rc]
+                is_on_path = (node_i, rc) in path_edges
+                ax.plot([x1, x2], [y1, y2],
+                        color="#e67e22" if is_on_path else "#d5dbdb",
+                        linewidth=2.0 if is_on_path else 0.6,
+                        alpha=0.9 if is_on_path else 0.4)
+
+        for node_i, (x, y) in positions.items():
+            lc = left_children[node_i]
+            rc = right_children[node_i]
+            is_leaf = lc < 0 and rc < 0
+            on_path = node_i in path_nodes
+
+            if is_leaf:
+                leaf_v = leaf_values[node_i] if node_i < len(leaf_values) else 0.0
+                prob = 1.0 / (1.0 + np.exp(-leaf_v)) if abs(leaf_v) < 50 else float(leaf_v > 0)
+                color = "#e74c3c" if prob > 0.5 else "#2ecc71"
+                box = FancyBboxPatch(
+                    (x - 0.12, y - 0.18), 0.24, 0.36,
+                    boxstyle="round,pad=0.02",
+                    facecolor=color if on_path else "#bdc3c7",
+                    edgecolor="white",
+                    alpha=0.9 if on_path else 0.5,
+                )
+                ax.add_patch(box)
+                ax.text(x, y, f"p={prob:.2f}", ha="center", va="center",
+                        fontsize=7, color="white", fontweight="bold" if on_path else "normal")
+            else:
+                fi = split_feats[node_i] if node_i < len(split_feats) else -1
+                fn = self._feat_name(fi)
+                th = thresholds[node_i] if node_i < len(thresholds) else 0.0
+                th_str = self._format_threshold(th)
+                try:
+                    fv = float(sample.get(fn, sample.get(fi, 0)))
+                except (TypeError, ValueError):
+                    fv = 0.0
+                label = f"{fn}\n<= {th_str}\n(实际={fv:.2f})"
+                box = FancyBboxPatch(
+                    (x - 0.22, y - 0.28), 0.44, 0.56,
+                    boxstyle="round,pad=0.02",
+                    facecolor="#e67e22" if on_path else "#3498db",
+                    edgecolor="white",
+                    alpha=0.9 if on_path else 0.6,
+                )
+                ax.add_patch(box)
+                ax.text(x, y, label, ha="center", va="center",
+                        fontsize=6.5, color="white")
+
+        ax.set_title(f"Decision Path — Tree #{tree_idx} (highlighted = taken path)", fontsize=10)
+        fig = ax.figure
+        fig.tight_layout()
+        return ax
+
+    # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
 
@@ -601,6 +938,389 @@ class TreeAnalyzer:
         paths["gain"] = p
 
         return paths
+
+    # ------------------------------------------------------------------
+    # Visualization
+    # ------------------------------------------------------------------
+
+    def visualize(
+        self,
+        output_dir: str | Path,
+        run_prefix: str = "",
+        top_k_gain: int = 20,
+        top_k_depth: int = 15,
+        top_k_inter: int = 20,
+        tree_idx: Optional[int] = None,
+    ) -> Dict[str, Path]:
+        """Generate all tree-model diagnostic plots and save as PNGs.
+
+        Parameters
+        ----------
+        output_dir : str or Path
+            Directory to save figure PNGs.
+        run_prefix : str
+            Prefix prepended to every output filename.
+        top_k_gain : int
+            Number of top features (by total gain) to plot.
+        top_k_depth : int
+            Number of top features (by split count) for the depth plot.
+        top_k_inter : int
+            Number of top feature-pairs for the interaction heatmap.
+        tree_idx : int, optional
+            Index of the tree to visualize structurally.  When ``None``,
+            the first tree with ``max_depth <= 5`` is chosen automatically
+            (falls back to tree 0 if no shallow tree exists).
+
+        Returns
+        -------
+        dict
+            Mapping of plot name → saved PNG path.
+        """
+        if not _HAS_MPL:
+            return {}
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{run_prefix}_" if run_prefix else ""
+
+        saved: Dict[str, Path] = {}
+
+        p = self._plot_feature_gain(output_dir, prefix, top_k_gain)
+        if p is not None:
+            saved["feature_gain"] = p
+
+        p = self._plot_feature_depth(output_dir, prefix, top_k_depth)
+        if p is not None:
+            saved["feature_depth"] = p
+
+        p = self._plot_interactions(output_dir, prefix, top_k_inter)
+        if p is not None:
+            saved["interactions"] = p
+
+        p = self._plot_tree_structure(output_dir, prefix, tree_idx)
+        if p is not None:
+            saved["tree_structure"] = p
+
+        plt.close("all")
+        return saved
+
+    def _plot_feature_gain(
+        self,
+        output_dir: Path,
+        prefix: str,
+        top_k: int,
+    ) -> Optional[Path]:
+        gain_df = self.analyze_gain(top_k=top_k)
+        if gain_df.empty:
+            return None
+
+        fig, ax = plt.subplots(figsize=(9, max(4, top_k * 0.35)))
+
+        feats = gain_df["feature"].values[::-1]
+        total = gain_df["total_gain"].values[::-1]
+        pct = gain_df["pct_trees_with_gain"].values[::-1]
+
+        y_pos = np.arange(len(feats))
+        bars = ax.barh(y_pos, total, color="steelblue", alpha=0.85, edgecolor="white")
+
+        for bar, pct_val in zip(bars, pct):
+            x = bar.get_width()
+            ax.text(
+                x,
+                bar.get_y() + bar.get_height() / 2,
+                f"  {pct_val:.0f}%",
+                va="center",
+                fontsize=8,
+                color="dimgray",
+            )
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(feats, fontsize=8)
+        ax.set_xlabel("Total Split Gain")
+        ax.set_title(f"Top {len(feats)} Features by Total Gain")
+        ax.grid(True, axis="x", alpha=0.3)
+        fig.tight_layout()
+
+        out = output_dir / f"{prefix}feature_gain.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out
+
+    def _plot_feature_depth(
+        self,
+        output_dir: Path,
+        prefix: str,
+        top_k: int,
+    ) -> Optional[Path]:
+        depth_df = self.analyze_depth()
+        if depth_df.empty:
+            return None
+
+        top_df = depth_df.head(top_k).copy()
+
+        depth_dist_data: Dict[str, Dict[int, int]] = {}
+        for _, row in top_df.iterrows():
+            feat = row["feature"]
+            raw = row["depth_distribution"]
+            try:
+                pairs = eval(raw)
+                depth_dist_data[feat] = {int(k): v for k, v in pairs.items()}
+            except Exception:
+                depth_dist_data[feat] = {}
+
+        all_depths = sorted(
+            {d for dist in depth_dist_data.values() for d in dist.keys()}
+        )
+        if not all_depths:
+            return None
+
+        fig, ax = plt.subplots(figsize=(9, max(4, len(top_df) * 0.35)))
+
+        feat_order = top_df["feature"].tolist()
+        x = np.arange(len(feat_order))
+        bottom = np.zeros(len(feat_order))
+        cmap = plt.cm.viridis(np.linspace(0.2, 0.9, len(all_depths)))
+
+        for d, color in zip(all_depths, cmap):
+            values = np.array(
+                [depth_dist_data.get(f, {}).get(d, 0) for f in feat_order],
+                dtype=float,
+            )
+            ax.bar(x, values, bottom=bottom, label=f"depth {d}", color=color, edgecolor="white", linewidth=0.3)
+            bottom += values
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(feat_order, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Split Count")
+        ax.set_title("Feature Split Count by Tree Depth")
+        ax.legend(fontsize=8, loc="upper right", title="Depth")
+        ax.grid(True, axis="y", alpha=0.3)
+        fig.tight_layout()
+
+        out = output_dir / f"{prefix}feature_depth.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out
+
+    def _plot_interactions(
+        self,
+        output_dir: Path,
+        prefix: str,
+        top_k: int,
+    ) -> Optional[Path]:
+        inter_df = self.mine_interactions(top_k=top_k)
+        if inter_df.empty:
+            return None
+
+        if _HAS_NX:
+            return self._plot_interactions_network(inter_df, output_dir, prefix)
+        return self._plot_interactions_heatmap(inter_df, output_dir, prefix)
+
+    def _plot_interactions_network(
+        self,
+        inter_df: pd.DataFrame,
+        output_dir: Path,
+        prefix: str,
+    ) -> Optional[Path]:
+        G = nx.Graph()
+        for _, row in inter_df.iterrows():
+            G.add_edge(
+                row["feature_1"],
+                row["feature_2"],
+                weight=row["shared_paths"],
+                cross=row.get("cross_source", False),
+            )
+
+        if G.number_of_nodes() == 0:
+            return None
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        pos = nx.spring_layout(G, k=1.2, seed=42, weight="weight")
+
+        edges = G.edges(data=True)
+        weights = [d["weight"] for _, _, d in edges]
+        max_w = max(weights) if weights else 1.0
+        edge_widths = [0.5 + 4.0 * (w / max_w) for w in weights]
+        edge_colors = ["#e74c3c" if d.get("cross", False) else "#3498db" for _, _, d in edges]
+
+        node_deg = dict(G.degree(weight="weight"))
+        node_sizes = [80 + 200 * (node_deg[n] / max(node_deg.values()) if node_deg else 1) for n in G.nodes()]
+
+        nx.draw_networkx_edges(G, pos, ax=ax, width=edge_widths, edge_color=edge_colors, alpha=0.7)
+        nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes, node_color="#f39c12", edgecolors="white")
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=7)
+
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color="#e74c3c", lw=2, label="Cross-source"),
+            Line2D([0], [0], color="#3498db", lw=2, label="Same-source"),
+        ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+        ax.set_title("Feature Interaction Network\n(edge width = shared paths)")
+        ax.axis("off")
+        fig.tight_layout()
+
+        out = output_dir / f"{prefix}feature_interactions.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out
+
+    def _plot_interactions_heatmap(
+        self,
+        inter_df: pd.DataFrame,
+        output_dir: Path,
+        prefix: str,
+    ) -> Optional[Path]:
+        features = sorted(
+            set(inter_df["feature_1"].tolist() + inter_df["feature_2"].tolist())
+        )
+        if not features:
+            return None
+
+        matrix = pd.DataFrame(0, index=features, columns=features, dtype=float)
+        for _, row in inter_df.iterrows():
+            matrix.loc[row["feature_1"], row["feature_2"]] = row["shared_paths"]
+            matrix.loc[row["feature_2"], row["feature_1"]] = row["shared_paths"]
+
+        fig, ax = plt.subplots(figsize=(max(6, len(features) * 0.35), max(5, len(features) * 0.3)))
+        im = ax.imshow(matrix.values, cmap="YlOrRd", aspect="auto")
+        ax.set_xticks(range(len(features)))
+        ax.set_xticklabels(features, rotation=45, ha="right", fontsize=7)
+        ax.set_yticks(range(len(features)))
+        ax.set_yticklabels(features, fontsize=7)
+        plt.colorbar(im, ax=ax, label="Shared Paths")
+        ax.set_title("Feature Interaction Heatmap")
+        fig.tight_layout()
+
+        out = output_dir / f"{prefix}feature_interactions.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out
+
+    def _plot_tree_structure(
+        self,
+        output_dir: Path,
+        prefix: str,
+        tree_idx: Optional[int],
+    ) -> Optional[Path]:
+        if not self._trees:
+            return None
+
+        if tree_idx is None:
+            tree_idx = 0
+            for i, t in enumerate(self._trees):
+                if t.get("max_depth", 99) <= 5:
+                    tree_idx = i
+                    break
+
+        tree = self._trees[tree_idx]
+        split_feats = tree["split_feature"]
+        thresholds = tree["threshold"]
+        left_children = tree["left_child"]
+        right_children = tree["right_child"]
+        leaf_values = tree["leaf_value"]
+        n = len(split_feats)
+
+        depth_map: Dict[int, int] = {}
+        self._compute_depths(0, 0, left_children, right_children, n, depth_map)
+
+        if not depth_map:
+            return None
+
+        max_depth = max(depth_map.values()) if depth_map else 0
+        n_levels = max_depth + 1
+
+        fig_width = max(10, 2 ** max_depth * 2.2)
+        fig_height = max(4, n_levels * 1.3)
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-n_levels - 0.5, 0.5)
+        ax.axis("off")
+
+        positions: Dict[int, Tuple[float, float]] = {}
+        for node_i, d in depth_map.items():
+            leaves_below = self._count_leaves_below(node_i, left_children, right_children, n)
+            total_leaves = self._count_leaves_below(0, left_children, right_children, n) or 1
+            x = (leaves_below / total_leaves) * 2.0 - 1.0
+            y = -d
+            positions[node_i] = (x, y)
+
+        for node_i in range(n):
+            lc = left_children[node_i]
+            rc = right_children[node_i]
+            if lc >= 0 and node_i in positions and lc in positions:
+                x1, y1 = positions[node_i]
+                x2, y2 = positions[lc]
+                ax.plot([x1, x2], [y1, y2], color="#7f8c8d", linewidth=0.8)
+            if rc >= 0 and node_i in positions and rc in positions:
+                x1, y1 = positions[node_i]
+                x2, y2 = positions[rc]
+                ax.plot([x1, x2], [y1, y2], color="#7f8c8d", linewidth=0.8)
+
+        for node_i, (x, y) in positions.items():
+            lc = left_children[node_i]
+            rc = right_children[node_i]
+            is_leaf = lc < 0 and rc < 0
+
+            if is_leaf:
+                leaf_v = leaf_values[node_i] if node_i < len(leaf_values) else 0.0
+                prob = 1.0 / (1.0 + np.exp(-leaf_v)) if abs(leaf_v) < 50 else float(leaf_v > 0)
+                color = "#e74c3c" if prob > 0.5 else "#2ecc71"
+                label = f"p={prob:.2f}"
+                box = FancyBboxPatch(
+                    (x - 0.12, y - 0.18), 0.24, 0.36,
+                    boxstyle="round,pad=0.02",
+                    facecolor=color, edgecolor="white",
+                    alpha=0.85,
+                )
+                ax.add_patch(box)
+                ax.text(x, y, label, ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+            else:
+                fi = split_feats[node_i] if node_i < len(split_feats) else -1
+                fn = self._feat_name(fi)
+                th = thresholds[node_i] if node_i < len(thresholds) else 0.0
+                th_str = self._format_threshold(th)
+                label = f"{fn}\n<= {th_str}"
+                box = FancyBboxPatch(
+                    (x - 0.18, y - 0.22), 0.36, 0.44,
+                    boxstyle="round,pad=0.02",
+                    facecolor="#3498db", edgecolor="white",
+                    alpha=0.9,
+                )
+                ax.add_patch(box)
+                ax.text(x, y, label, ha="center", va="center", fontsize=7, color="white")
+
+        ax.set_title(
+            f"Tree #{tree_idx} (depth={max_depth}, n_leaves={sum(1 for i in range(n) if left_children[i] < 0 and right_children[i] < 0)})",
+            fontsize=10,
+        )
+        fig.tight_layout()
+
+        out = output_dir / f"{prefix}tree_structure.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out
+
+    @staticmethod
+    def _count_leaves_below(
+        node_idx: int,
+        left_children: List[int],
+        right_children: List[int],
+        n: int,
+    ) -> int:
+        if node_idx >= n or node_idx < 0:
+            return 0
+        lc = left_children[node_idx]
+        rc = right_children[node_idx]
+        if lc < 0 and rc < 0:
+            return 1
+        total = 0
+        if lc >= 0:
+            total += TreeAnalyzer._count_leaves_below(lc, left_children, right_children, n)
+        if rc >= 0:
+            total += TreeAnalyzer._count_leaves_below(rc, left_children, right_children, n)
+        return total
 
     # ------------------------------------------------------------------
     # Summary

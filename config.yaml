@@ -1,13 +1,50 @@
+# Feature engineering pipeline configuration
+#
+# Three-layer architecture:
+#   Layer 1 - 通用基础特征 (Generic): stateless/lightweight, run first
+#   Layer 2 - 欺诈领域特征 (Fraud-Domain): fraud-specific, entity-aware
+#   Layer 3 - 业务领域特征 (Business-Domain): graph-based, heavy computation
+#
+# Execution order matters:
+#   - TargetEncoderFeature MUST run before CategoricalEncoder
+#     (target encoding needs original string values, not label-encoded ints)
+#   - Stateful features (TargetEncoderFeature, HistoryFeature,
+#     AggregationFeature, GraphFeature) must run in the same order
+#     between fit() and transform()
+#   - GraphFeature runs last because it is the most expensive and
+#     benefits from all entity columns being available
+
 feature_steps:
+  # ========== Layer 1: 通用基础特征 (Generic) ==========
+  # Stateless transformations, safe to run in any order
+  - TargetEncoderFeature:
+      smoothing: 50.0
+      min_samples: 10
   - CategoricalEncoder
-  - TargetEncoderFeature
   - TimeFeature
   - AmountFeature
+
+  # ========== Layer 2: 欺诈领域特征 (Fraud-Domain) ==========
+  # Fraud-specific signals using entity relationships and behavioral patterns
   - DeviceFeature
   - EmailFeature
   - CardFeature
   - AddrFeature
-  - HistoryFeature
+  - HistoryFeature:
+      name: "HistoryFeature_1h"
+      window_seconds: 3600
+  - HistoryFeature:
+      name: "HistoryFeature_1day"
+      window_seconds: 86400
   - MissingPatternFeature
   - AggregationFeature
   - CrossFeature
+
+  # ========== Layer 3: 业务领域特征 (Business-Domain) ==========
+  # Graph-based entity-relationship features, computationally expensive
+  - SequenceFeature:
+      embed_dim: 32
+      max_seq_len: 20
+      epochs: 10
+      batch_size: 256
+  - GraphFeature

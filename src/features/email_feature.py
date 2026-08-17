@@ -90,6 +90,22 @@ class EmailFeature(FeatureBase):
 
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "EmailFeature",
+            "layer": "fraud-domain",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "EmailFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- EmailFeature",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         return {
             "feature_names": [

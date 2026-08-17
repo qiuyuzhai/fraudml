@@ -124,6 +124,22 @@ class MissingPatternFeature(FeatureBase):
 
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "MissingPatternFeature",
+            "layer": "fraud-domain",
+            "is_stateful": True,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "MissingPatternFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- MissingPatternFeature",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         flag_names = [f"{c}_missing_flag" for c in self._flag_cols]
         return {

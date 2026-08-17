@@ -66,6 +66,22 @@ class TimeFeature(FeatureBase):
 
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "TimeFeature",
+            "layer": "generic",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "TimeFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- TimeFeature",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         return {
             "feature_names": [

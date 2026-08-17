@@ -58,6 +58,12 @@ class AggregationFeature(FeatureBase):
     def is_stateful(self) -> bool:
         return True
 
+    @property
+    def _col_suffix(self) -> str:
+        if self.name == self.__class__.__name__:
+            return ""
+        return f"_{self.name}"
+
     def __init__(
         self,
         name: str = "AggregationFeature",
@@ -90,6 +96,7 @@ class AggregationFeature(FeatureBase):
             raise RuntimeError(f"{self.name}: not fitted.")
 
         df = df.copy()
+        suffix = self._col_suffix
         new_cols: Dict[str, pd.Series] = {}
 
         for key_spec in self._group_keys:
@@ -111,7 +118,7 @@ class AggregationFeature(FeatureBase):
                     continue
 
                 for stat in self._stats:
-                    col_name = f"{key_name}_{col}_{stat}"
+                    col_name = f"{key_name}_{col}_{stat}{suffix}"
 
                     if stat == "count":
                         val = (g.cumcount() + 1).groupby(key_arrays).shift(1).fillna(0).astype(np.int32)
@@ -146,10 +153,58 @@ class AggregationFeature(FeatureBase):
 
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "AggregationFeature",
+            "layer": "fraud-domain",
+            "is_stateful": True,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "AggregationFeature",
+                    "description": "Instance name. Use unique name for different agg configs.",
+                },
+                {
+                    "name": "agg_cols",
+                    "type": "list[str]",
+                    "default": ["TransactionAmt"],
+                    "description": "Numerical columns to aggregate.",
+                },
+                {
+                    "name": "group_keys",
+                    "type": "list[list[str]]",
+                    "default": [["card1"], ["card1", "addr1"], ["P_emaildomain"]],
+                    "description": "Group-by keys. Each entry is a list of column names (supports composite keys).",
+                },
+                {
+                    "name": "stats",
+                    "type": "list[str]",
+                    "default": ["count", "sum", "mean", "std"],
+                    "description": "Statistics to compute. Options: count, sum, mean, std.",
+                },
+            ],
+            "example": """# Single instance:
+- AggregationFeature
+
+# Multiple instances with different focus:
+- AggregationFeature:
+    name: "AggregationFeature_amt"
+    agg_cols: ["TransactionAmt"]
+    group_keys: [["card1"]]
+    stats: ["count", "sum", "mean"]
+- AggregationFeature:
+    name: "AggregationFeature_dist"
+    agg_cols: ["dist1", "dist2"]
+    group_keys: [["card1", "addr1"]]
+    stats: ["mean", "std"]""",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
+        suffix = self._col_suffix
         return {
             "feature_names": [
-                f"{'+'.join(k)}_{c}_{s}"
+                f"{'+'.join(k)}_{c}_{s}{suffix}"
                 for k in self._group_keys
                 for c in self._agg_cols
                 for s in self._stats

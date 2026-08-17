@@ -293,6 +293,22 @@ class DeviceFeature(FeatureBase):
 
         return df
 
+    def get_config_schema(self) -> Dict[str, Any]:
+        return {
+            "class_name": "DeviceFeature",
+            "layer": "fraud-domain",
+            "is_stateful": False,
+            "parameters": [
+                {
+                    "name": "name",
+                    "type": "str",
+                    "default": "DeviceFeature",
+                    "description": "Instance name.",
+                },
+            ],
+            "example": "- DeviceFeature",
+        }
+
     def get_feature_metadata(self) -> Dict[str, Any]:
         feature_names = [
             "device_os_android",
