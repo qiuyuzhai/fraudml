@@ -185,6 +185,46 @@ class FeatureBase(ABC):
         """
         return False
 
+    @property
+    def is_streaming(self) -> bool:
+        """Whether this feature supports real-time incremental updates.
+
+        Streaming features can update their internal state (e.g.
+        sequence embeddings) one transaction at a time via
+        :meth:`init_streaming` and :meth:`update_stream`.
+
+        Override in subclasses (e.g. SequenceFeature).
+        """
+        return False
+
+    def init_streaming(self) -> "FeatureBase":
+        """Initialize streaming inference state after :meth:`fit`.
+
+        Default is a no-op.  Subclasses that support streaming
+        (``is_streaming == True``) should override to build any
+        runtime-only components (e.g. LSTMCell stacks).
+        """
+        return self
+
+    def update_stream(self, row: pd.DataFrame) -> pd.DataFrame:
+        """Incrementally update streaming state with new data.
+
+        Default is a no-op — returns *row* unchanged.  Subclasses
+        that support streaming should override to update internal
+        embeddings / statistics.
+
+        Parameters
+        ----------
+        row : pd.DataFrame
+            New transaction row(s) to absorb into the streaming state.
+
+        Returns
+        -------
+        pd.DataFrame
+            Transformed row(s) with updated features.
+        """
+        return row
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return configuration schema for this feature.
 

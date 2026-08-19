@@ -74,6 +74,7 @@ class FraudPredictor:
 
         self.selected_features_: List[str] = self.metadata.get("selected_features", [])
         self.raw_columns_: List[str] = self.metadata.get("raw_columns", [])
+        self._streaming_initialized: bool = False
 
         self.logger = logging.getLogger(f"FraudPredictor-{id(self)}")
 
@@ -94,7 +95,7 @@ class FraudPredictor:
         serializer = ModelSerializer(artifact_dir)
         components = serializer.deserialize_for_inference()
 
-        return cls(
+        predictor = cls(
             cleaner=components["cleaner"],
             registry=components["registry"],
             iv_selector=components["iv_selector"],
@@ -104,6 +105,14 @@ class FraudPredictor:
             risk_engine=components.get("risk_engine"),
             metadata=components.get("metadata", {}),
         )
+
+        streaming_features = predictor.init_streaming()
+        if streaming_features:
+            predictor.logger.info(
+                "Auto-initialized streaming for: %s", streaming_features
+            )
+
+        return predictor
 
     def predict(
         self,
@@ -229,6 +238,112 @@ class FraudPredictor:
         if all_results and isinstance(all_results[0], pd.DataFrame):
             return pd.concat(all_results, axis=0).reset_index(drop=True)
         return np.concatenate(all_results)
+
+    def init_streaming(self) -> List[str]:
+        """Initialize streaming features for real-time incremental updates.
+
+        Calls ``init_streaming_all()`` on the feature registry.
+        Must be called once after loading the predictor and before
+        using :meth:`predict_streaming`.
+
+        Returns
+        -------
+        list[str]
+            Names of features that were initialized for streaming.
+        """
+        if self._streaming_initialized:
+            return self.registry.get_streaming_features()
+
+        initialized = self.registry.init_streaming_all()
+        self._streaming_initialized = True
+        self.logger.info(
+            "Streaming initialized for: %s", initialized
+        )
+        return initialized
+
+    def predict_streaming(
+        self,
+        df: pd.DataFrame,
+        threshold: Optional[float] = None,
+        return_all: bool = False,
+    ) -> Union[np.ndarray, pd.DataFrame]:
+        """Real-time prediction with incremental streaming updates.
+
+        For each row in *df*, updates streaming features (e.g.
+        SequenceFeature embeddings) before scoring, so that the
+        model sees the most up-to-date behavioral state.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            New transaction(s).  Must contain the columns expected
+            by the pipeline.
+        threshold : float, optional
+            Classification threshold.
+        return_all : bool
+            If True, returns a DataFrame with probabilities and
+            risk levels.
+
+        Returns
+        -------
+        np.ndarray or pd.DataFrame
+            Prediction result (same format as :meth:`predict`).
+        """
+        if not self._streaming_initialized:
+            self.init_streaming()
+
+        self._validate_input(df)
+
+        df_clean = self.cleaner.transform(df)
+
+        df_updated = self.registry.update_streaming_all(df_clean)
+
+        df_encoded = self.registry.transform_all(df_updated)
+
+        for col in ["isFraud", "TransactionDT"]:
+            if col in df_encoded.columns:
+                df_encoded = df_encoded.drop(columns=[col])
+
+        df_selected = self.iv_selector.transform(df_encoded)
+
+        if self.vif_filter is not None:
+            df_final = self.vif_filter.transform(df_selected)
+        else:
+            df_final = df_selected
+
+        if self.selected_features_:
+            for col in self.selected_features_:
+                if col not in df_final.columns:
+                    df_final[col] = 0.0
+            df_final = df_final[self.selected_features_]
+
+        y_prob_raw = self.model.predict_proba(df_final)[:, 1]
+
+        if self.calibrator is not None and getattr(self.calibrator, "_fitted", False):
+            y_prob = self.calibrator.transform(y_prob_raw)
+        else:
+            y_prob = y_prob_raw
+
+        if threshold is None:
+            if self.risk_engine is not None:
+                risk_levels = self.risk_engine.predict(y_prob)
+                result = pd.DataFrame({
+                    "probability": y_prob,
+                    "risk_level": risk_levels,
+                })
+                if return_all:
+                    return result
+                return y_prob
+            return y_prob
+
+        y_pred = (y_prob >= threshold).astype(int)
+        if return_all:
+            result = pd.DataFrame({
+                "probability": y_prob,
+                "binary_prediction": y_pred,
+            })
+            return result
+        return y_pred
 
     def _validate_input(self, df: pd.DataFrame) -> None:
         """Validate input DataFrame has required columns."""

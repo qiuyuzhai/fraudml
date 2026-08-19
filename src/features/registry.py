@@ -272,6 +272,58 @@ class FeatureRegistry:
         self.fit_all(df)
         return self.transform_all(df)
 
+    def init_streaming_all(self) -> List[str]:
+        """Initialize streaming state for all features that support it.
+
+        Calls :meth:`~src.features.base.FeatureBase.init_streaming` on
+        every feature with ``is_streaming == True``.
+
+        Returns
+        -------
+        list[str]
+            Names of features that were initialized for streaming.
+        """
+        initialized: List[str] = []
+        for name in self._execution_order:
+            feat = self._instances[name]
+            if getattr(feat, "is_streaming", False):
+                feat.init_streaming()
+                initialized.append(name)
+        return initialized
+
+    def update_streaming_all(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Incrementally update all streaming features with new data.
+
+        For each feature with ``is_streaming == True``, calls
+        :meth:`~src.features.base.FeatureBase.update_stream` which
+        absorbs the new transaction(s) into the feature's internal state.
+
+        Non-streaming features pass *df* through unchanged.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            New transaction row(s).
+
+        Returns
+        -------
+        pd.DataFrame
+            Transformed *df* with updated streaming features.
+        """
+        for name in self._execution_order:
+            feat = self._instances[name]
+            if getattr(feat, "is_streaming", False):
+                df = feat.update_stream(df)
+        return df
+
+    def get_streaming_features(self) -> List[str]:
+        """Return names of features that support streaming."""
+        return [
+            name
+            for name in self._execution_order
+            if getattr(self._instances[name], "is_streaming", False)
+        ]
+
     def generate(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate full feature set in one call.
 

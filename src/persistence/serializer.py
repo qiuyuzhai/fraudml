@@ -261,6 +261,12 @@ class ModelSerializer:
         registry._execution_order = execution_order
         result["registry"] = registry
 
+        streaming_features = registry.init_streaming_all()
+        if streaming_features:
+            self.logger.info(
+                "    Streaming initialized for: %s", streaming_features
+            )
+
         iv_path = self.stateful_dir / "iv_selector.joblib"
         result["iv_selector"] = joblib.load(iv_path) if iv_path.exists() else None
 

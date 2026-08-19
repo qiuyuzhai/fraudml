@@ -810,7 +810,7 @@ class TrainPipeline:
             self.logger.error("Step 'clean' failed: %s", e)
             raise
 
-    # 把清洗后的 train/val 特征合并起来跑特征工程，再按原顺序拆回去，核心难点是「合并-排序-拆分过程中索引不能乱」
+    # 严格的 train-only fit 契约：fit 仅看训练数据，transform 应用到 val，避免跨集 groupby 聚合泄露
     def _step_encode_features(self) -> None:
         self.logger.info("[6] Feature engineering ...")
         try:
@@ -865,7 +865,7 @@ class TrainPipeline:
                     "GraphFeature",
                 ]
                 self.registry_._configure_steps(default_steps)
-            # --- 没办法，报错内存不够了：Downcast to save memory before combining ---
+            # --- Downcast to save memory ---
             for col in X_train_clean.select_dtypes(include="float64").columns:
                 X_train_clean[col] = X_train_clean[col].astype(np.float32)
             for col in X_train_clean.select_dtypes(include="int64").columns:
@@ -875,34 +875,50 @@ class TrainPipeline:
             for col in X_val_clean.select_dtypes(include="int64").columns:
                 X_val_clean[col] = X_val_clean[col].astype(np.int32)
 
-            # --- 重要: 按照位置拆分而不是索引，确保 train/val 分割正确 ---
-            n_train = len(X_train_clean)
-            n_val = len(X_val_clean)
+            # --- 防泄露：fit 仅在 train 上做，val 用 train 学到的状态 transform ---
+            # HistoryFeature/AggregationFeature 等有状态特征依赖时间排序，单独排序各集合
+            sort_col = "TransactionDT" if "TransactionDT" in X_train_clean.columns else None
+            if sort_col is not None:
+                X_train_sorted = X_train_clean.sort_values(sort_col).reset_index(drop=True)
+                X_val_sorted = X_val_clean.sort_values(sort_col).reset_index(drop=True)
+            else:
+                X_train_sorted = X_train_clean.reset_index(drop=True)
+                X_val_sorted = X_val_clean.reset_index(drop=True)
 
-            combined = pd.concat([X_train_clean, X_val_clean]) 
-            combined = combined.sort_values("TransactionDT").reset_index(drop=True)
+            # fit_transform_all = fit_all + transform_all；只对 train 做
+            self.registry_.fit_all(X_train_sorted)
+            X_train_fe = self.registry_.transform_all(X_train_sorted)
+            # val 用 train 已 fit 的 registry 状态单独 transform，杜绝跨集 groupby 泄露
+            X_val_fe = self.registry_.transform_all(X_val_sorted)
 
-            combined_fe = self.registry_.fit_transform_all(combined)
+            streaming_features = self.registry_.init_streaming_all()
+            if streaming_features:
+                self.logger.info("    Streaming initialized for: %s", streaming_features)
 
-            # 防御断言：确保特征工程没有改变 train/val 的物理边界（比如去重后导致验证集的一行数据跑到训练集了）
-            if "TransactionID" in combined_fe.columns:
-                train_id_set = set(X_train_clean["TransactionID"].unique())
-                fe_train_ids = set(combined_fe.iloc[:n_train]["TransactionID"].unique())
-                if not fe_train_ids.issubset(train_id_set):
-                    overlap = fe_train_ids & set(X_val_clean["TransactionID"].unique())
-                    raise RuntimeError(
-                        f"Feature engineering leaked validation rows into "
-                        f"training slice! Overlapping TransactionIDs: {list(overlap)[:10]}..."
-                    )            
+            # 防御断言：特征工程后行数必须与输入一致（未丢行/加行）
+            assert len(X_train_fe) == len(X_train_clean), (
+                f"Train rows changed after feature engineering: "
+                f"{len(X_train_clean)} → {len(X_train_fe)}"
+            )
+            assert len(X_val_fe) == len(X_val_clean), (
+                f"Val rows changed after feature engineering: "
+                f"{len(X_val_clean)} → {len(X_val_fe)}"
+            )
 
-            for df in [combined_fe]:
+            # 清理临时列（target 与时间列不进模型）
+            for df in [X_train_fe, X_val_fe]:
                 if target_col in df.columns:
                     df.drop(columns=[target_col], inplace=True)
                 if "TransactionDT" in df.columns:
                     df.drop(columns=["TransactionDT"], inplace=True)
 
-            X_train_fe = combined_fe.iloc[:n_train].copy()
-            X_val_fe = combined_fe.iloc[n_train:].copy()
+            # 确保两集列对齐（transform_all 应产出相同列集）
+            if list(X_train_fe.columns) != list(X_val_fe.columns):
+                # 补缺失列（val 未出现某 category 等），保证模型输入一致
+                for col in X_train_fe.columns:
+                    if col not in X_val_fe.columns:
+                        X_val_fe[col] = 0.0
+                X_val_fe = X_val_fe[X_train_fe.columns]
 
             self.metadata_["X_train_fe"] = X_train_fe
             self.metadata_["X_val_fe"] = X_val_fe
