@@ -1,0 +1,82 @@
+services:
+  # --- Training job -------------------------------------------------------
+  # Run ad-hoc training runs: `docker compose run --rm training`
+  training:
+    build: .
+    image: fraudml:latest
+    profiles: ["training"]
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./mlruns:/app/mlruns
+      - ./configs:/app/configs:ro
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_REGISTRY_MODEL_NAME: fraudml
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  # --- MLflow tracking + model registry ----------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root /mlruns
+      --host 0.0.0.0
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlflow.db:/mlflow.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  # --- FastAPI online scoring service ------------------------------------
+  # `docker compose up api` starts the real-time scoring layer.
+  api:
+    build: .
+    image: fraudml:latest
+    profiles: ["serving"]
+    ports:
+      - "8000:8000"
+    command: ["python", "-m", "uvicorn", "src.serving.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+      - ./configs:/app/configs:ro
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # --- Optional Postgres backend for MLflow -------------------------------
+  # Enable with: `docker compose --profile postgres up`
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:

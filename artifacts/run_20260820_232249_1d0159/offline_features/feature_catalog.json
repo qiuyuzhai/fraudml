@@ -1,0 +1,48 @@
+{
+  "catalog_name": "fraudml_fraudml_hybrid",
+  "total_entries": 2,
+  "entries": [
+    {
+      "source": "TimeFeature",
+      "feature_names": [
+        "TransactionDT_hour",
+        "TransactionDT_dow",
+        "is_midnight_flag",
+        "time_of_day"
+      ],
+      "physical_meaning": "Time-of-day / day-of-week metadata",
+      "unit": "hour / flag / period",
+      "depends_on_target": false,
+      "is_stateful": false,
+      "fitted": true
+    },
+    {
+      "source": "AmountFeature",
+      "feature_names": [
+        "log_TransactionAmt",
+        "is_integer_amount",
+        "is_first_trx",
+        "card1_amount_delta",
+        "card1_amount_ratio"
+      ],
+      "physical_meaning": "Transaction amount derived features",
+      "unit": "log_usd / flag / ratio / usd",
+      "depends_on_target": false,
+      "is_stateful": false,
+      "fitted": true
+    }
+  ],
+  "all_feature_names": [
+    "TransactionDT_hour",
+    "TransactionDT_dow",
+    "is_midnight_flag",
+    "time_of_day",
+    "log_TransactionAmt",
+    "is_integer_amount",
+    "is_first_trx",
+    "card1_amount_delta",
+    "card1_amount_ratio"
+  ],
+  "stateful_feature_sources": [],
+  "target_dependent_sources": []
+}

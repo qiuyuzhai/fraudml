@@ -274,6 +274,18 @@ class FeatureBase(ABC):
             "depends_on_target": False,
         }
 
+    def get_input_columns(self) -> list[str]:
+        """Return the raw upstream column names this feature reads from.
+
+        Used by the Feature Store to construct lineage edges (which raw
+        columns feed into which engineered feature). Default ``[]``
+        means "all upstream outputs"; subclasses that operate on a
+        well-defined column set (e.g. ``AggregationFeature`` aggregating
+        ``TransactionAmt`` grouped by ``card1``) should override to
+        list those columns explicitly.
+        """
+        return []
+
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------

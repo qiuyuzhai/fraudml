@@ -12,36 +12,80 @@ random_seed: 42
 data:
   val_ratio: 0.2
   data_dir: data/raw
+  engine: pandas        # 'pandas' | 'polars'：数据加载与有状态特征聚合的执行引擎
+  data_format: csv     # 'csv' | 'parquet'：DataLoader 读取的原始文件格式
+
+# Feature Store：SQLite 元数据库（版本/lineage/统计），独立可用，TrainPipeline.fit() 末尾按开关注册
+feature_store:
+  enabled: true
+  db_path: artifacts/feature_store.db
 
 features:
+  # config_path 保留以兼容外部引用；优先使用下方 steps（已合并自根 config.yaml 的三层架构）
+  # 解析时按 configs/<config_path> 查找
   config_path: config.yaml
+  # Feature engineering pipeline configuration
+  #
+  # Three-layer architecture:
+  #   Layer 1 - 通用基础特征 (Generic): stateless/lightweight, run first
+  #   Layer 2 - 欺诈领域特征 (Fraud-Domain): fraud-specific, entity-aware
+  #   Layer 3 - 业务领域特征 (Business-Domain): graph-based, heavy computation
+  #
+  # Execution order matters:
+  #   - TargetEncoderFeature MUST run before CategoricalEncoder
+  #     (target encoding needs original string values, not label-encoded ints)
+  #   - Stateful features (TargetEncoderFeature, HistoryFeature,
+  #     AggregationFeature, GraphFeature) must run in the same order
+  #     between fit() and transform()
+  #   - GraphFeature runs last because it is the most expensive and
+  #     benefits from all entity columns being available
   steps:
+    # ========== Layer 1: 通用基础特征 (Generic) ==========
+    # Stateless transformations, safe to run in any order
+    - TargetEncoderFeature:
+        smoothing: 50.0
+        min_samples: 10
     - CategoricalEncoder
-    - TargetEncoderFeature
     - TimeFeature
     - AmountFeature
+
+    # ========== Layer 2: 欺诈领域特征 (Fraud-Domain) ==========
+    # Fraud-specific signals using entity relationships and behavioral patterns
     - DeviceFeature
     - EmailFeature
     - CardFeature
     - AddrFeature
     - HistoryFeature:
-      name: "HistoryFeature_multi"
-      window: [600, 3600, 21600, 86400, 604800]
-      stats: ["count", "mean", "std", "min", "max"]
-      agg_cols: ["TransactionAmt"]
-    - VectorFeature
+        name: "HistoryFeature_1h"
+        window_seconds: 3600
+    - HistoryFeature:
+        name: "HistoryFeature_1day"
+        window_seconds: 86400
     - MissingPatternFeature
     - AggregationFeature
     - CrossFeature
 
+    # ========== Layer 3: 业务领域特征 (Business-Domain) ==========
+    # Graph-based entity-relationship features, computationally expensive
+    - SequenceFeature:
+        embed_dim: 32
+        max_seq_len: 20
+        epochs: 10
+        batch_size: 256
+    - GraphFeature
+
 selection:
-  iv_threshold: 0.005
+  iv_threshold: 0.0       # 放宽：保留所有有预测力的特征（基准只筛了 IV=0 的）
   iv_bins: 10
   vif_threshold: 10.0
   vif_max_iter: 50
-  psi_threshold: 0.25
+  psi_threshold: 1.0      # 放宽：不做 PSI 漂移过滤
 
 model:
+  # 三家 wrapper 均实现 ModelBase ABC，可经此字段切换：
+  #   lightgbm (默认) | xgboost | catboost | optuna_lgbm
+  # 注意：以下 params 字段以 lightgbm 命名为基准；切换到 xgboost/catboost 时
+  # 需相应改 num_leaves→max_depth、min_child_samples→min_child_weight 等。
   type: lightgbm
   params:
     n_estimators: 500
@@ -53,6 +97,7 @@ model:
     colsample_bytree: 0.8
     reg_alpha: 0.1
     reg_lambda: 0.1
+    # 'auto' 触发 train_pipeline 的成本/类别比例自动计算；填写数字则直接覆盖
     scale_pos_weight: auto
 
 cv:
@@ -116,6 +161,20 @@ mlflow:
   experiment_name: fraudml
   run_name: null
   tracking_uri: null
+  registry:
+    enabled: false         # 训练 save() 末尾按此开关注册到 Model Registry；默认关闭以保留现有训练流
+    model_name: fraudml    # 注册的模型名
+    stage: Staging         # 新版本初始 stage；晋升 Production 为独立手动步骤
 
 checkpoint:
   force_refresh: false
+
+serving:
+  # FastAPI 在线服务配置（任务 6）。实际部署通过 .env 覆盖。
+  host: 0.0.0.0
+  port: 8000
+  model_artifact_dir: null    # 本地 artifact_dir 路径；优先级低于 registry
+  model_name: null            # MLflow Model Registry 名称；为空则走本地路径
+  model_stage: Production
+  mlflow_tracking_uri: null
+  feature_store_db: artifacts/feature_store.db

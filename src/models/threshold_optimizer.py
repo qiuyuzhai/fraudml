@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_score, recall_score
 
+from .decision_base import DecisionBase
+
 try:
     import matplotlib.pyplot as plt
     _HAS_MATPLOTLIB = True
@@ -21,7 +23,7 @@ except ImportError:
     _HAS_MATPLOTLIB = False
 
 
-class ThresholdOptimizer:
+class ThresholdOptimizer(DecisionBase):
     """Optimize classification threshold based on business cost.
 
     Parameters
@@ -61,6 +63,7 @@ class ThresholdOptimizer:
         max_threshold: float = 0.99,
         n_steps: int = 99,
     ) -> None:
+        super().__init__()
         self.cost_fp = cost_fp
         self.cost_fn = cost_fn
         self.min_threshold = min_threshold
@@ -84,6 +87,47 @@ class ThresholdOptimizer:
         cum_pos = np.cumsum(sorted_y == 1) / n_pos
         cum_neg = np.cumsum(sorted_y == 0) / n_neg
         return float(np.max(np.abs(cum_pos - cum_neg)))
+
+    def fit(
+        self, y_true: np.ndarray, y_prob: np.ndarray, **kwargs
+    ) -> "ThresholdOptimizer":
+        """:class:`DecisionBase` 契约入口；委托给 :meth:`optimize`。
+
+        Parameters
+        ----------
+        y_true : np.ndarray
+            Ground truth binary labels (0/1).
+        y_prob : np.ndarray
+            Predicted positive-class probabilities.
+
+        Returns
+        -------
+        self : ThresholdOptimizer
+        """
+        self.optimize(y_true, y_prob)
+        return self
+
+    def predict(self, y_prob: np.ndarray, **kwargs) -> Dict[str, np.ndarray]:
+        """:class:`DecisionBase` 契约入口；返回 ``{binary_prediction, probability}``。
+
+        Parameters
+        ----------
+        y_prob : np.ndarray
+            Predicted positive-class probabilities.
+
+        Returns
+        -------
+        dict
+            - ``binary_prediction``: 0/1 predictions at ``best_threshold_``.
+            - ``probability``: input probabilities (echoed for downstream use).
+        """
+        if self.best_threshold_ is None:
+            raise RuntimeError(
+                "ThresholdOptimizer not fitted. Call fit() or optimize() first."
+            )
+        threshold = kwargs.get("threshold", self.best_threshold_)
+        binary = (y_prob >= threshold).astype(int)
+        return {"binary_prediction": binary, "probability": y_prob}
 
     def optimize(
         self, y_true: np.ndarray, y_pred_proba: np.ndarray
@@ -147,6 +191,7 @@ class ThresholdOptimizer:
         self.best_recall_ = best_rec
         self.best_ks_ = best_ks
         self.cost_curve_ = pd.DataFrame(records)
+        self._fitted = True
 
         return {
             "best_threshold": self.best_threshold_,

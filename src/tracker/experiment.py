@@ -108,3 +108,65 @@ class ExperimentTracker:
         if self._run is not None:
             mlflow.end_run()
             self._run = None
+
+    def register_model(
+        self,
+        name: str,
+        artifact_dir: str | Path,
+        stage: str = "Staging",
+    ) -> Optional[str]:
+        """Register the trained pipeline (artifact_dir) to the Model Registry.
+
+        Packages the full artifact directory (cleaner / feature
+        registry / selectors / model / calibrator / risk engine /
+        metadata) as a pyfunc model so ``mlflow.pyfunc.load_model``
+        returns a callable wrapping :class:`FraudPredictor`. Then calls
+        :func:`mlflow.register_model` to create a new model version and
+        transitions it to *stage*.
+
+        Parameters
+        ----------
+        name : str
+            Registered model name (created if it does not exist).
+        artifact_dir : str | Path
+            Path to the pipeline artifact directory (the one produced
+            by :class:`ModelSerializer`).
+        stage : str
+            Initial stage for the new version (``"Staging"`` by
+            default). Transitioning to ``"Production"`` is a separate
+            manual step (``MlflowClient.transition_model_version_stage``).
+
+        Returns
+        -------
+        str or None
+            The registered version number on success, or ``None`` if
+            registration failed (logged, not raised — the train pipeline
+            should not abort on registry failure).
+        """
+        try:
+            from mlflow.pyfunc import log_model
+            from mlflow.tracking import MlflowClient
+
+            from .model_pyfunc import FraudMLPyFunc
+
+            artifacts = {"artifact_dir": str(Path(artifact_dir).resolve())}
+            log_model(
+                model=FraudMLPyFunc(),
+                artifact_path="model",
+                artifacts=artifacts,
+            )
+            model_uri = f"runs:/{self.run_id}/model"
+            result = mlflow.register_model(model_uri=model_uri, name=name)
+
+            if stage:
+                client = MlflowClient()
+                client.transition_model_version_stage(
+                    name=name,
+                    version=int(result.version),
+                    stage=stage,
+                    archive_existing_versions=True,
+                )
+            return str(result.version)
+        except Exception as e:
+            print(f"[ExperimentTracker] register_model failed: {e}")
+            return None

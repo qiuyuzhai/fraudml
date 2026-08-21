@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .decision_base import DecisionBase
+
 try:
     import matplotlib.pyplot as plt
     _HAS_MATPLOTLIB = True
@@ -24,7 +26,7 @@ except ImportError:
     _HAS_MATPLOTLIB = False
 
 
-class RiskDecisionEngine:
+class RiskDecisionEngine(DecisionBase):
     """Multi-level risk decision engine.
 
     Parameters
@@ -71,6 +73,7 @@ class RiskDecisionEngine:
         max_threshold: float = 0.99,
         n_steps: int = 50,
     ) -> None:
+        super().__init__()
         self.cost_fp = cost_fp
         self.cost_fn = cost_fn
         self.medium_threshold = medium_threshold
@@ -83,7 +86,6 @@ class RiskDecisionEngine:
         self.optimal_high_threshold_: Optional[float] = None
         self.total_cost_: Optional[float] = None
         self.cost_curve_: Optional[pd.DataFrame] = None
-        self._fitted: bool = False
 
     def fit(
         self, y_true: np.ndarray, y_prob: np.ndarray

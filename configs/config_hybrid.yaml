@@ -1,0 +1,125 @@
+# FraudML — Hybrid Config (Raw Features + Minimal Additive FE)
+#
+# 保留所有原始列 + 只加对树模型有用的增量特征（时间分解、金额变换、目标编码、交叉特征）。
+# 去掉对树模型帮助有限或可能引入噪声的步骤（CategoricalEncoder、HistoryFeature、GraphFeature、SequenceFeature）。
+# 目标：原始列 + 少量高质量新特征 > 纯原始列基准。
+#
+# Usage:
+#   python src/train.py --config-name config_hybrid
+
+name: fraudml_hybrid
+
+random_seed: 42
+evaluate_on_finish: true
+
+data:
+  val_ratio: 0.2
+  data_dir: data/raw
+  engine: polars
+  data_format: parquet
+
+features:
+  config_path: config.yaml
+  steps:
+    - TimeFeature               # 时间分解（hour/day/weekday）—— LightGBM 无法从原始时间戳提取周期性
+    - AmountFeature             # 金额变换（log/decimal）—— 对数变换帮助树模型分裂
+    - UIDFeature:               # 客户唯一标识 + 聚合特征（冠军方案 "magic feature"）
+        uid_cols: [card1, addr1, D1]
+        agg_col: TransactionAmt
+        windows: [3600, 86400]   # 1 小时、1 天的滚动计数
+#    去掉：CategoricalEncoder（LightGBM 原生处理类别，编码反而丢信息）
+#    去掉：CardFeature / AddrFeature（LightGBM 能自己学交互）
+#    去掉：HistoryFeature_multi（降级模式无历史窗口，引入噪声）
+#    去掉：GraphFeature / SequenceFeature（复杂模型容易过拟合）
+
+selection:
+  iv_threshold: 0.0       # 保留所有有预测力的特征
+  iv_bins: 10
+  vif_threshold: 10.0
+  vif_max_iter: 50
+  psi_threshold: 1.0      # 不做 PSI 漂移过滤
+
+model:
+  type: lightgbm
+  params:
+    n_estimators: 500
+    learning_rate: 0.05
+    num_leaves: 63
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    scale_pos_weight: auto
+
+cv:
+  enabled: false
+  n_splits: 5
+  purge_gap: 0
+
+calibration:
+  enabled: false
+  method: platt
+  cv_folds: 3
+  n_jobs: -1
+
+interpretability:
+  enabled: false
+  max_features: 20
+  n_samples: 100
+
+tree_analysis:
+  enabled: false
+  max_rules_per_tree: 5
+  min_paths: 10
+  trace:
+    enabled: false
+    n_samples: 3
+    top_n_trees: 5
+
+risk_decision:
+  enabled: false
+  cost_fp: 10.0
+  cost_fn: 500.0
+  medium_threshold: 0.3
+  high_threshold: 0.7
+
+evaluation:
+  top_k_pct: 0.05
+
+model_comparison:
+  enabled: false
+  models:
+    - lr
+    - lightgbm
+  metrics:
+    - auc
+    - ks
+
+threshold:
+  cost_fp: 10.0
+  cost_fn: 500.0
+
+monitoring:
+  auc_threshold: 0.7
+
+output:
+  dir: artifacts
+
+mlflow:
+  enabled: false
+  experiment_name: fraudml_hybrid
+  run_name: null
+  tracking_uri: null
+  registry:
+    enabled: false
+    model_name: fraudml
+    stage: Staging
+
+checkpoint:
+  force_refresh: false
+
+logging:
+  level: INFO
+  file: null

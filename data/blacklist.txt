@@ -1,0 +1,22 @@
+# Blacklisted card1 values (high fraud rate from training data)
+# Format: one card1 value per line
+3643
+16927
+10054
+10175
+5912
+13994
+4347
+12473
+4693
+9375
+9499
+5853
+15525
+12958
+6357
+11482
+12023
+11716
+14015
+3920

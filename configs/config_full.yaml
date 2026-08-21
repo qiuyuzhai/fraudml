@@ -25,6 +25,8 @@ evaluate_on_finish: true
 data:
   val_ratio: 0.2
   data_dir: data/raw
+  engine: polars          # 'pandas' | 'polars'：polars 加载+聚合更快
+  data_format: parquet    # 'csv' | 'parquet'：parquet 读取速度快 3-5 倍
 
 features:
   config_path: config.yaml
@@ -54,7 +56,7 @@ features:
       window: [600, 3600, 21600, 86400, 604800]
       stats: ["count", "mean", "std", "min", "max"]
       agg_cols: ["TransactionAmt"]
-    - VectorFeature
+    - VelocityFeature
     - MissingPatternFeature
     - AggregationFeature
     - CrossFeature:
@@ -104,7 +106,7 @@ model:
     scale_pos_weight: auto
 
 cv:
-  enabled: true
+  enabled: false          # 交叉验证关闭：5 折会让训练时间 ×5，val 集已够评估
   n_splits: 5
   purge_gap: 0
 
@@ -166,6 +168,10 @@ mlflow:
   experiment_name: fraudml
   run_name: null
   tracking_uri: null
+  registry:
+    enabled: true           # 训练完自动注册到 Model Registry
+    model_name: fraudml
+    stage: Staging          # 初始 stage；晋升 Production 为独立手动步骤
 
 checkpoint:
   force_refresh: false

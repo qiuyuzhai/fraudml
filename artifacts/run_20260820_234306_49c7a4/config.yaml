@@ -1,0 +1,22 @@
+{
+  "name": "fraudml_hybrid",
+  "random_seed": 42,
+  "evaluate_on_finish": true,
+  "data": "{'val_ratio': 0.2, 'data_dir': 'data/raw', 'engine': 'polars', 'data_format': 'parquet'}",
+  "features": "{'config_path': 'config.yaml', 'steps': ['TimeFeature', 'AmountFeature', {'UIDFeature': {'uid_cols': ['card1', 'addr1', 'D1'], 'agg_col': 'TransactionAmt', 'windows': [3600, 86400]}}]}",
+  "selection": "{'iv_threshold': 0.0, 'iv_bins': 10, 'vif_threshold': 10.0, 'vif_max_iter': 50, 'psi_threshold': 1.0}",
+  "model": "{'type': 'lightgbm', 'params': {'n_estimators': 500, 'learning_rate': 0.05, 'num_leaves': 63, 'max_depth': -1, 'min_child_samples': 20, 'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'scale_pos_weight': 'auto'}}",
+  "cv": "{'enabled': False, 'n_splits': 5, 'purge_gap': 0}",
+  "calibration": "{'enabled': False, 'method': 'platt', 'cv_folds': 3, 'n_jobs': -1}",
+  "interpretability": "{'enabled': False, 'max_features': 20, 'n_samples': 100}",
+  "tree_analysis": "{'enabled': False, 'max_rules_per_tree': 5, 'min_paths': 10, 'trace': {'enabled': False, 'n_samples': 3, 'top_n_trees': 5}}",
+  "risk_decision": "{'enabled': False, 'cost_fp': 10.0, 'cost_fn': 500.0, 'medium_threshold': 0.3, 'high_threshold': 0.7}",
+  "evaluation": "{'top_k_pct': 0.05}",
+  "model_comparison": "{'enabled': False, 'models': ['lr', 'lightgbm'], 'metrics': ['auc', 'ks']}",
+  "threshold": "{'cost_fp': 10.0, 'cost_fn': 500.0}",
+  "monitoring": "{'auc_threshold': 0.7}",
+  "output": "{'dir': 'artifacts'}",
+  "mlflow": "{'enabled': False, 'experiment_name': 'fraudml_hybrid', 'run_name': None, 'tracking_uri': None, 'registry': {'enabled': False, 'model_name': 'fraudml', 'stage': 'Staging'}}",
+  "checkpoint": "{'force_refresh': True}",
+  "logging": "{'level': 'INFO', 'file': None}"
+}

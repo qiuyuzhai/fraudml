@@ -168,6 +168,47 @@ class FeatureCatalog:
         catalog._entries = data.get("entries", [])
         return catalog
 
+    def to_feature_store(self, store: Any) -> None:
+        """Bridge a single catalog snapshot into a :class:`FeatureStore`.
+
+        Each catalog entry (one per ``FeatureBase`` instance) is registered
+        as one feature in the store, with lineage edges derived from the
+        feature's :meth:`FeatureBase.get_input_columns` (empty list =
+        "no specific upstream columns tracked"). This is a one-way write
+        bridge: the store accumulates versioned history across runs while
+        the catalog remains a stateless per-run JSON snapshot.
+
+        Parameters
+        ----------
+        store : FeatureStore
+            Target store instance. Pass an already-constructed
+            :class:`~src.feature_store.FeatureStore`; this method only
+            calls ``store.registry.register(...)``.
+        """
+        registry = store.registry
+        for entry in self._entries:
+            source = entry.get("source", "")
+            if not source:
+                continue
+            feature_names = entry.get("feature_names", [])
+            schema_meta = {
+                "feature_names": feature_names,
+                "physical_meaning": entry.get("physical_meaning", ""),
+                "unit": entry.get("unit", ""),
+                "depends_on_target": entry.get("depends_on_target", False),
+                "is_stateful": entry.get("is_stateful", False),
+            }
+            # Catalog entries don't carry raw_column lineage directly;
+            # callers needing precise lineage should register features
+            # individually via the registry API (see train_pipeline hook).
+            registry.register(
+                source,
+                entity="transaction",
+                feature_type="derived",
+                description=entry.get("physical_meaning", "") or source,
+                schema_meta=schema_meta,
+            )
+
     def __repr__(self) -> str:
         total = len(self._entries)
         features = len(self.get_all_feature_names())

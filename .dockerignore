@@ -1,0 +1,41 @@
+# Virtual environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data, artifacts, and run outputs (mounted as volumes at runtime instead)
+data/raw/*.csv
+data/raw/*.zip
+data/raw/*.parquet
+artifacts/
+mlruns/
+mlflow.db
+outputs/
+hydra/
+
+# Version control and editor config
+.git/
+.gitignore
+.vscode/
+.idea/
+.trae/
+
+# Docs and CI that aren't needed inside the image
+*.md
+docs/
+.github/
+
+# Local secrets / environment files
+.env
+.env.local
+
+# Serialized model artifacts (kept out of image; mounted or fetched from registry)
+*.pkl
+*.joblib
+*.lgb
+*.model

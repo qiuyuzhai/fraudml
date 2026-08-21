@@ -12,10 +12,9 @@ The pipeline is configured via a Hydra YAML config dictionary.
 
 from __future__ import annotations
 
-import hashlib 
+import hashlib
 import logging
 import os
-import sys
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,19 +23,19 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
+from omegaconf import OmegaConf
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-import lightgbm as lgb
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import average_precision_score, brier_score_loss, f1_score, log_loss, precision_score, recall_score, roc_auc_score
 
-from src.data import DataLoader, DataProfiler, DataCleaner
+from src.data import DataProfiler, DataCleaner
+from src.data.loader import make_loader
 from src.features import FeatureRegistry, FeatureCatalog
+from src.feature_store import FeatureStore
 from src.selection import IVSelector, VIFFilter
 from src.monitoring import PSIMonitor
 from src.evaluation import PurgedTimeSeriesSplit
-from src.models import ThresholdOptimizer, RiskDecisionEngine
+from src.models import ThresholdOptimizer, RiskDecisionEngine, ModelBase, make_model
 from src.calibration import (
     Calibrator,
     PlattScalingCalibrator,
@@ -76,7 +75,7 @@ class TrainPipeline:
         Fitted IV selector.
     vif_filter_ : VIFFilter
         Fitted VIF filter.
-    model_ : lgb.LGBMClassifier
+    model_ : ModelBase
         Trained model.
     threshold_optimizer_ : ThresholdOptimizer
         Fitted threshold optimizer.
@@ -106,7 +105,7 @@ class TrainPipeline:
         self.iv_selector_: Optional[IVSelector] = None
         self.vif_filter_: Optional[VIFFilter] = None
         self.selected_features_: List[str] = []
-        self.model_: Optional[lgb.LGBMClassifier] = None
+        self.model_: Optional[ModelBase] = None
         self.calibrator_: Optional[Calibrator] = None
         self.calibrator_evaluator_: Optional[CalibrationEvaluator] = None
         self.threshold_optimizer_: Optional[ThresholdOptimizer] = None
@@ -444,8 +443,41 @@ class TrainPipeline:
         self.logger.info("[Save] Structured artifacts in %s/online_artifacts/", self.output_dir)
 
         self._log_mlflow_artifacts()
+        self._maybe_register_to_model_registry()
 
         return path
+
+    def _maybe_register_to_model_registry(self) -> None:
+        """Register the just-saved artifact_dir to MLflow Model Registry.
+
+        Triggered at the end of :meth:`save` when
+        ``cfg['mlflow']['registry']['enabled']`` is true. Default false
+        to preserve the existing training flow; opt-in via config.
+        """
+        registry_cfg = (self.cfg.get("mlflow", {}) or {}).get("registry", {}) or {}
+        if not registry_cfg.get("enabled", False):
+            return
+        if self._mlflow is None or not getattr(self._mlflow, "run_id", None):
+            self.logger.warning(
+                "[Registry] MLflow run not active; skipping model registration."
+            )
+            return
+        model_name = registry_cfg.get("model_name", "fraudml")
+        stage = registry_cfg.get("stage", "Staging")
+        try:
+            version = self._mlflow.register_model(
+                name=model_name,
+                artifact_dir=self.output_dir,
+                stage=stage,
+            )
+            if version:
+                self.logger.info(
+                    "[Registry] Registered '%s' version %s (stage=%s)",
+                    model_name, version, stage,
+                )
+                self.metadata_["registry_model_version"] = version
+        except Exception as e:
+            self.logger.warning("[Registry] Registration failed: %s", e)
 
     def predict(
         self, df: pd.DataFrame, threshold: Optional[float] = None
@@ -706,7 +738,9 @@ class TrainPipeline:
         try:
             data_cfg = self.cfg.get("data", {})
             data_dir = data_cfg.get("data_dir")
-            loader = DataLoader(data_dir=data_dir) if data_dir else DataLoader()
+            engine = data_cfg.get("engine", "pandas")
+            data_format = data_cfg.get("data_format", "csv")
+            loader = make_loader(engine=engine, data_dir=data_dir, data_format=data_format)
             train_txn, train_id = loader.load_train()
             self.metadata_["train_id"] = train_id
             self.metadata_["raw_train"] = train_txn
@@ -828,11 +862,12 @@ class TrainPipeline:
             self.registry_ = FeatureRegistry()
             self.registry_.auto_discover("src.features")
 
+            # 仅在 cfg['features']['steps'] 缺失时回退到 config_path 文件解析
+            # 路径查找限定在 configs/ 目录与包内 configs/，避免根 config.yaml 残留引用
             resolved_path = None
             for candidate in [
-                Path(config_path),
                 Path("configs") / config_path,
-                Path(__file__).resolve().parent.parent.parent / config_path,
+                Path(__file__).resolve().parent.parent.parent / "configs" / config_path,
             ]:
                 if candidate.exists():
                     resolved_path = candidate
@@ -841,6 +876,10 @@ class TrainPipeline:
             override_steps = feature_cfg.get("steps")
             if override_steps is not None:
                 self.logger.info("    Using feature steps from config override")
+                # Hydra yields ListConfig/DictConfig; the registry's
+                # _configure_steps isinstance(step, dict) check needs
+                # native containers, so resolve to plain Python first.
+                override_steps = OmegaConf.to_container(override_steps, resolve=True)
                 self.registry_._instances.clear()
                 self.registry_._execution_order = []
                 self.registry_._configure_steps(override_steps)
@@ -858,10 +897,10 @@ class TrainPipeline:
                     "CardFeature",
                     "AddrFeature",
                     "HistoryFeature",
-                    "VelocityFeature",
                     "MissingPatternFeature",
                     "AggregationFeature",
                     "CrossFeature",
+                    "SequenceFeature",
                     "GraphFeature",
                 ]
                 self.registry_._configure_steps(default_steps)
@@ -924,9 +963,86 @@ class TrainPipeline:
             self.metadata_["X_val_fe"] = X_val_fe
 
             self.logger.info("    Final features: %d", X_train_fe.shape[1])
+
+            # Feature Store 注册（开关：cfg['feature_store']['enabled']，默认 true）
+            self._register_feature_store(
+                X_train_fe, self.metadata_["y_train"], target_col
+            )
         except Exception as e:
             self.logger.error("Step 'encode_features' failed: %s", e)
             raise
+
+    def _register_feature_store(
+        self, X_train_fe: pd.DataFrame, y_train: pd.Series, target_col: str
+    ) -> None:
+        """Register engineered features into the Feature Store.
+
+        Triggered at the end of :meth:`_step_encode_features` so the
+        full engineered feature matrix is available for statistics.
+        Skipped entirely when ``cfg['feature_store']['enabled']`` is
+        false — zero impact on the existing pandas path.
+
+        For each feature in ``registry_._instances``:
+        * ``raw_columns`` lineage = ``feature.get_input_columns()`` (or
+          fallback to intersection of upstream output + raw_columns).
+        * ``schema_meta`` = ``feature.get_feature_metadata()``.
+        * Statistics are recorded against the train feature matrix.
+        """
+        fs_cfg = self.cfg.get("feature_store", {})
+        if not fs_cfg.get("enabled", True):
+            self.logger.info("    [FeatureStore] Disabled by config, skipping.")
+            return
+
+        db_path = fs_cfg.get("db_path", "artifacts/feature_store.db")
+        store = FeatureStore(db_path)
+        raw_columns_known = set(self.metadata_.get("raw_columns", []))
+        target_for_iv = target_col if target_col in X_train_fe.columns else None
+
+        registered = 0
+        for name, feat in self.registry_._instances.items():
+            input_cols = feat.get_input_columns() if hasattr(feat, "get_input_columns") else []
+            upstream_features = []  # cross-feature lineage not derivable from registry currently
+            if not input_cols and raw_columns_known:
+                # Fallback: any output column whose name matches a known raw column
+                input_cols = [
+                    c for c in feat.get_feature_metadata().get("feature_names", [])
+                    if c in raw_columns_known
+                ]
+            try:
+                store.registry.register(
+                    name,
+                    entity="transaction",
+                    feature_type="derived",
+                    description=feat.get_feature_metadata().get("physical_meaning", "") or name,
+                    raw_columns=input_cols or None,
+                    upstream_features=upstream_features or None,
+                    schema_meta=feat.get_feature_metadata(),
+                    run_id=getattr(self, "_mlflow_run_id", None),
+                )
+                # record_statistics expects columns matching the feature's outputs
+                feat_outputs = feat.get_feature_metadata().get("feature_names", [])
+                stats_df = X_train_fe if target_for_iv else X_train_fe
+                if feat_outputs:
+                    try:
+                        store.registry.record_statistics(
+                            name, stats_df, target=target_for_iv,
+                            iv_bins=self.cfg.get("selection", {}).get("iv_bins", 10),
+                        )
+                    except Exception as stat_err:
+                        self.logger.warning(
+                            "    [FeatureStore] stats failed for '%s': %s", name, stat_err
+                        )
+                registered += 1
+            except Exception as reg_err:
+                self.logger.warning(
+                    "    [FeatureStore] register '%s' failed: %s", name, reg_err
+                )
+
+        self.metadata_["feature_store_db"] = db_path
+        self._feature_store = store
+        self.logger.info(
+            "    [FeatureStore] Registered %d features to %s", registered, db_path
+        )
 
     def _step_feature_selection(self) -> None:
         self.logger.info("[7] Feature selection (IV + VIF) ...")
@@ -1149,7 +1265,7 @@ class TrainPipeline:
 
     def _train_lightgbm(
         self, X: pd.DataFrame, y: np.ndarray, model_cfg: Dict[str, Any]
-    ) -> lgb.LGBMClassifier:
+    ) -> ModelBase:
         params = model_cfg.get("params", {})
 
         pos_weight_raw = params.get("scale_pos_weight", "auto")
@@ -1210,7 +1326,7 @@ class TrainPipeline:
         if use_cv:
             return self._train_with_cv(X, y, default_params, cv_cfg)
         else:
-            model = lgb.LGBMClassifier(**default_params)
+            model = make_model("lightgbm", default_params)
             model.fit(X, y)
             self.logger.info(
                 "    LightGBM trained with %d features", X.shape[1]
@@ -1220,7 +1336,7 @@ class TrainPipeline:
     def _train_with_cv(
         self, X: pd.DataFrame, y: np.ndarray,
         params: Dict[str, Any], cv_cfg: Dict[str, Any],
-    ) -> lgb.LGBMClassifier:
+    ) -> ModelBase:
         n_splits = cv_cfg.get("n_splits", 5)
         purge_gap = cv_cfg.get("purge_gap", 0)
 
@@ -1235,7 +1351,7 @@ class TrainPipeline:
             X_va = X.iloc[val_idx]
             y_va = y[val_idx]
 
-            fold_model = lgb.LGBMClassifier(**params)
+            fold_model = make_model("lightgbm", params)
             fold_model.fit(X_tr, y_tr)
 
             y_prob = fold_model.predict_proba(X_va)[:, 1]
@@ -1252,13 +1368,13 @@ class TrainPipeline:
 
         final_params = {k: v for k, v in params.items() if k != "verbosity"}
         final_params["verbosity"] = -1
-        model = lgb.LGBMClassifier(**final_params)
+        model = make_model("lightgbm", final_params)
         model.fit(X, y)
         return model
 
     def _train_optuna_lgbm(
         self, X: pd.DataFrame, y: np.ndarray, model_cfg: Dict[str, Any]
-    ) -> lgb.LGBMClassifier:
+    ) -> ModelBase:
         try:
             import optuna
             from optuna.samplers import TPESampler
@@ -1304,7 +1420,7 @@ class TrainPipeline:
                 X_va = X.iloc[val_idx]
                 y_va = y[val_idx]
 
-                mdl = lgb.LGBMClassifier(**params)
+                mdl = make_model("lightgbm", params)
                 mdl.fit(X_tr, y_tr)
                 y_prob = mdl.predict_proba(X_va)[:, 1]
                 fold_aucs.append(roc_auc_score(y_va, y_prob))
@@ -1331,7 +1447,7 @@ class TrainPipeline:
             "params": study.best_params,
         }
 
-        model = lgb.LGBMClassifier(**best_params)
+        model = make_model("lightgbm", best_params)
         model.fit(X, y)
         return model
 
@@ -1752,6 +1868,17 @@ class TrainPipeline:
 
             catalog_path = self.output_dir / "offline_features" / "feature_catalog.json"
             catalog.export(catalog_path)
+
+            # 双写过渡：把 catalog 快照也灌入 Feature Store（独立于 _register_feature_store
+            # 的 per-version 注册，这里保证即使编码步骤被跳过、catalog 仍可桥接进 store）
+            store = getattr(self, "_feature_store", None)
+            if store is not None:
+                try:
+                    catalog.to_feature_store(store)
+                except Exception as bridge_err:
+                    self.logger.warning(
+                        "[FeatureCatalog] to_feature_store bridge failed: %s", bridge_err
+                    )
 
             self.logger.info("[FeatureCatalog] Exported %d entries, %d features to %s",
                              len(catalog._entries),

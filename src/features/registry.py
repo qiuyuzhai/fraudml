@@ -33,7 +33,7 @@ class FeatureRegistry:
 
         registry = FeatureRegistry()
         registry.auto_discover("src.features")
-        registry.configure("config.yaml")
+        registry.configure("configs/config.yaml")
         registry.fit_all(train_df)
         result = registry.transform_all(train_df)
         registry.save_all("artifacts/features")

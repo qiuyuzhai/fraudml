@@ -114,6 +114,60 @@ class FraudPredictor:
 
         return predictor
 
+    @classmethod
+    def from_model_registry(
+        cls,
+        name: str,
+        stage: str = "Production",
+        tracking_uri: Optional[str] = None,
+    ) -> "FraudPredictor":
+        """Load a predictor from the MLflow Model Registry.
+
+        Resolves the latest model version in *stage* for *name*,
+        downloads the logged ``artifact_dir`` and reconstructs the
+        predictor via :meth:`from_artifact_dir`. Falls back to
+        :meth:`from_artifact_dir` semantics — no model is silently
+        reconstructed from a bare estimator.
+
+        Parameters
+        ----------
+        name : str
+            Registered model name.
+        stage : str
+            Stage to resolve (``"Production"`` default).
+        tracking_uri : str, optional
+            MLflow tracking URI; forwarded to ``mlflow.set_tracking_uri``.
+
+        Returns
+        -------
+        FraudPredictor
+        """
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+
+        client = MlflowClient()
+        versions = client.get_latest_versions(name, stages=[stage])
+        if not versions:
+            raise ValueError(
+                f"No model version found for name='{name}' stage='{stage}'."
+            )
+        version = versions[0]
+        run_id = version.run_id
+
+        # Download the "model" artifact path containing artifact_dir/
+        dst_path = mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="model"
+        )
+        artifact_dir = Path(dst_path) / "artifact_dir"
+        if not artifact_dir.exists():
+            raise FileNotFoundError(
+                f"artifact_dir not found in downloaded model artifacts at {dst_path}"
+            )
+        return cls.from_artifact_dir(artifact_dir)
+
     def predict(
         self,
         df: pd.DataFrame,
@@ -175,7 +229,8 @@ class FraudPredictor:
 
         if threshold is None:
             if self.risk_engine is not None:
-                risk_levels = self.risk_engine.predict(y_prob)
+                risk_result = self.risk_engine.predict(y_prob)
+                risk_levels = risk_result["risk_levels"]
                 result = pd.DataFrame({
                     "probability": y_prob,
                     "risk_level": risk_levels,
@@ -326,7 +381,8 @@ class FraudPredictor:
 
         if threshold is None:
             if self.risk_engine is not None:
-                risk_levels = self.risk_engine.predict(y_prob)
+                risk_result = self.risk_engine.predict(y_prob)
+                risk_levels = risk_result["risk_levels"]
                 result = pd.DataFrame({
                     "probability": y_prob,
                     "risk_level": risk_levels,

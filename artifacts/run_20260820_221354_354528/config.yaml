@@ -1,0 +1,22 @@
+{
+  "name": "fraudml_full",
+  "random_seed": 42,
+  "evaluate_on_finish": true,
+  "data": "{'val_ratio': 0.2, 'data_dir': 'data/raw', 'engine': 'polars', 'data_format': 'parquet'}",
+  "features": "{'config_path': 'config.yaml', 'steps': [{'TargetEncoderFeature': {'name': 'TargetEncoderFeature_high', 'smoothing': 50.0, 'min_samples': 10, 'encode_cols': ['card1', 'addr1', 'P_emaildomain', 'card2', 'card5']}}, {'TargetEncoderFeature': {'name': 'TargetEncoderFeature_low', 'smoothing': 200.0, 'min_samples': 30, 'encode_cols': ['card1', 'addr1']}}, 'CategoricalEncoder', 'TimeFeature', 'AmountFeature', 'DeviceFeature', 'EmailFeature', 'CardFeature', 'AddrFeature', {'HistoryFeature': None, 'name': 'HistoryFeature_multi', 'window': [600, 3600, 21600, 86400, 604800], 'stats': ['count', 'mean', 'std', 'min', 'max'], 'agg_cols': ['TransactionAmt']}, 'VelocityFeature', 'MissingPatternFeature', 'AggregationFeature', {'CrossFeature': {'name': 'CrossFeature_card_addr', 'cross_pairs': [['card1', 'addr1'], ['card1', 'card2'], ['card1', 'addr2']]}}, {'CrossFeature': {'name': 'CrossFeature_email_device', 'cross_pairs': [['P_emaildomain', 'DeviceType'], ['P_emaildomain', 'id_30'], ['DeviceType', 'id_31']]}}, {'SequenceFeature': {'model_type': 'cnn', 'embed_dim': 64, 'max_seq_len': 30, 'epochs': 20, 'batch_size': 512, 'feature_cols': ['TransactionAmt', 'dist1', 'dist2', 'C1', 'C2', 'C3'], 'device': 'auto'}}, 'GraphFeature']}",
+  "selection": "{'iv_threshold': 0.005, 'iv_bins': 10, 'vif_threshold': 10.0, 'vif_max_iter': 50, 'psi_threshold': 0.25}",
+  "model": "{'type': 'lightgbm', 'n_trials': 20, 'params': {'n_estimators': 500, 'learning_rate': 0.05, 'num_leaves': 63, 'max_depth': -1, 'min_child_samples': 20, 'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'scale_pos_weight': 'auto'}}",
+  "cv": "{'enabled': False, 'n_splits': 5, 'purge_gap': 0}",
+  "calibration": "{'enabled': True, 'method': 'platt', 'cv_folds': 3, 'n_jobs': -1}",
+  "interpretability": "{'enabled': True, 'max_features': 20, 'n_samples': 100}",
+  "tree_analysis": "{'enabled': True, 'max_rules_per_tree': 5, 'min_paths': 10, 'trace': {'enabled': True, 'n_samples': 3, 'top_n_trees': 5}}",
+  "risk_decision": "{'enabled': True, 'cost_fp': 10.0, 'cost_fn': 500.0, 'medium_threshold': 0.3, 'high_threshold': 0.7}",
+  "evaluation": "{'top_k_pct': 0.05}",
+  "model_comparison": "{'enabled': True, 'models': ['lr', 'lightgbm', 'xgboost', 'catboost', 'random_forest'], 'metrics': ['auc', 'ks', 'brier', 'logloss']}",
+  "threshold": "{'cost_fp': 10.0, 'cost_fn': 500.0}",
+  "monitoring": "{'auc_threshold': 0.7}",
+  "output": "{'dir': 'artifacts'}",
+  "mlflow": "{'enabled': True, 'experiment_name': 'fraudml', 'run_name': None, 'tracking_uri': None, 'registry': {'enabled': True, 'model_name': 'fraudml', 'stage': 'Staging'}}",
+  "checkpoint": "{'force_refresh': True}",
+  "logging": "{'level': 'INFO', 'file': None}"
+}

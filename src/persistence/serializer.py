@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 
 import joblib
 import pandas as pd
+from omegaconf import OmegaConf
 
 
 class ModelSerializer:
@@ -52,14 +53,6 @@ class ModelSerializer:
     artifact_dir : str | Path
         Root artifact directory (e.g. ``artifacts/run_20260813_143052_a1b2c3``).
     """
-
-    ONLINE_STATEFUL_STEPS = [
-        "cleaner",
-        "CategoricalEncoder",
-        "TargetEncoderFeature",
-        "MissingPatternFeature",
-        "AggregationFeature",
-    ]
 
     def __init__(self, artifact_dir: str | Path) -> None:
         self.artifact_dir = Path(artifact_dir)
@@ -189,6 +182,12 @@ class ModelSerializer:
 
         if pipeline.registry_ is not None:
             meta["execution_order"] = pipeline.registry_._execution_order
+            # Persist the step configs so named instances (e.g.
+            # HistoryFeature_1h with window_seconds=3600) can be
+            # reconstructed with their constructor params at load time.
+            raw_steps = pipeline.cfg.get("features", {}).get("steps")
+            if raw_steps is not None:
+                meta["feature_steps"] = OmegaConf.to_container(raw_steps, resolve=True)
 
         if hasattr(pipeline, "_feature_catalog") and pipeline._feature_catalog:
             meta["feature_catalog"] = pipeline._feature_catalog.to_dict()
@@ -199,10 +198,30 @@ class ModelSerializer:
         if pipeline.risk_engine_ is not None:
             meta["risk_decision"] = pipeline.metadata_.get("risk_decision", {})
 
+        # Feature Store path (if registration was enabled at train time)
+        feature_store_db = pipeline.metadata_.get("feature_store_db")
+        if feature_store_db:
+            meta["feature_store_db"] = feature_store_db
+            src_path = Path(feature_store_db)
+            if src_path.exists():
+                dst_path = self.offline_dir / "feature_store.db"
+                self._copy_file(src_path, dst_path)
+
         with open(self.online_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, default=str, ensure_ascii=False)
 
         self.logger.info("    Saved metadata.json")
+
+    @staticmethod
+    def _copy_file(src: Path, dst: Path) -> None:
+        """Copy *src* to *dst* (best-effort; non-fatal on failure)."""
+        import shutil
+
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        except Exception:
+            pass
 
     def deserialize_for_inference(self) -> Dict[str, Any]:
         """Load only the components needed for online inference.
@@ -244,21 +263,38 @@ class ModelSerializer:
         registry = FeatureRegistry()
         registry.auto_discover("src.features")
 
-        execution_order = result["metadata"].get("execution_order", [])
-        for class_name in execution_order:
-            if class_name in registry._classes:
-                cls = registry._classes[class_name]
-                instance = cls(name=class_name)
-                registry._instances[class_name] = instance
-            else:
-                self.logger.warning("    Feature class '%s' not discovered, skipping.", class_name)
+        # Prefer the saved step configs — they carry constructor params
+        # (e.g. window_seconds) needed to rebuild named instances like
+        # HistoryFeature_1h. Fall back to execution_order for older
+        # artifacts that only stored instance/class names.
+        feature_steps = result["metadata"].get("feature_steps")
+        if feature_steps:
+            registry._configure_steps(feature_steps)
+        else:
+            execution_order = result["metadata"].get("execution_order", [])
+            for class_name in execution_order:
+                if class_name in registry._classes:
+                    cls = registry._classes[class_name]
+                    instance = cls(name=class_name)
+                    registry._instances[class_name] = instance
+                else:
+                    self.logger.warning(
+                        "    Feature class '%s' not discovered, skipping.", class_name
+                    )
+            registry._execution_order = list(execution_order)
 
         for name, feat in registry._instances.items():
             feat_path = self.stateful_dir / f"{name}.joblib"
             if feat_path.exists():
                 feat.load(feat_path)
 
-        registry._execution_order = execution_order
+        # Stateless features were never persisted (no learned state);
+        # their fit() is a no-op, so mark them fitted so transform_all
+        # can proceed at inference time.
+        for name, feat in registry._instances.items():
+            if not getattr(feat, "is_stateful", False) and not feat._fitted:
+                feat._fitted = True
+
         result["registry"] = registry
 
         streaming_features = registry.init_streaming_all()
