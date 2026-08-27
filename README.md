@@ -26,30 +26,105 @@
 
 ## 架构
 
-```
-交易请求
-    │
-    ▼
-┌───────────────────────────────────────┐
-│  第一层：规则引擎（毫秒级）              │
-│  · 命中黑名单     → 拦截 (BLOCK)       │   ← 命中直接拦截，
-│  · 速度异常检测   → 校验 (CHALLENGE)   │   ← 无需调用模型
-│  · 金额阈值       → 校验 (CHALLENGE)   │
-└──────────────┬────────────────────────┘
-               │ 通过（无规则命中）
-               ▼
-┌───────────────────────────────────────┐
-│  第二层：ML 模型（LightGBM）            │
-│  · 特征管道（降级模式）                 │
-│  · predict_proba → 输出概率            │
-│  · 三级风险：低 / 中 / 高              │
-└──────────────┬────────────────────────┘
-               │
-               ▼
-        放行 / 升级校验 / 拦截并人工审核
+### 在线打分流程
+
+```mermaid
+flowchart TD
+    A[交易请求<br/>POST /score] --> B{规则引擎<br/>毫秒级}
+    B -->|命中黑名单| C[BLOCK<br/>直接拦截]
+    B -->|速度异常| D[CHALLENGE<br/>升级校验]
+    B -->|金额阈值| D
+    B -->|通过| E[ML 模型<br/>LightGBM predict_proba]
+    E --> F{三级风险决策}
+    F -->|低风险 p < 0.01| G[ALLOW<br/>放行]
+    F -->|中风险 0.01≤p<0.03| H[CHALLENGE<br/>升级校验]
+    F -->|高风险 p ≥ 0.03| I[REVIEW<br/>拦截/人工审核]
+    style B fill:#ffd166,stroke:#d99500
+    style E fill:#06d6a0,stroke:#048a6e
+    style F fill:#118ab2,stroke:#0b6d8c
 ```
 
-**降级模式**：有状态特征（HistoryFeature、AggregationFeature）需要 Redis 提供实时历史上下文。当 Redis 不可用时，服务会标记 `features_degraded=true`，仅使用可用的无状态特征进行打分。
+> **降级模式**：有状态特征（HistoryFeature、AggregationFeature）需要 Redis 提供实时历史上下文。当 Redis 不可用时，服务会标记 `features_degraded=true`，仅使用可用的无状态特征进行打分。
+
+### 系统组件
+
+```mermaid
+graph LR
+    subgraph Client[调用方]
+        C1[在线服务调用]
+        C2[批量打分]
+    end
+
+    subgraph Serving[FastAPI 服务层]
+        S1[app.py<br/>/score · /explain]
+        S2[schemas.py]
+        S3[config.py]
+    end
+
+    subgraph Core[核心业务层]
+        direction TB
+        R[rules/engine.py<br/>RuleEngine]
+        P[pipeline/inference_pipeline.py<br/>FraudPredictor]
+        FP[features/registry.py<br/>FeaturePipeline]
+        M[models/base.py<br/>ModelBase · LightGBM]
+        RD[models/risk_decision.py<br/>三级风控]
+        IE[interpretability/shap_explainer.py]
+    end
+
+    subgraph Infra[基础设施]
+        PS[persistence/serializer.py<br/>模型制品]
+        FS[feature_store/<br/>SQLite 版本+血缘]
+        TR[tracker/<br/>MLflow 实验追踪]
+        MO[monitoring/<br/>PSI 漂移·对抗检测]
+        DB[(Redis<br/>实时特征)]
+    end
+
+    C1 --> S1
+    C2 --> S1
+    S1 --> R
+    R -->|命中| S1
+    R -->|未命中| P
+    P --> FP
+    FP --> M
+    M --> RD
+    RD --> S1
+    P --> IE
+    FP --> FS
+    FP --> DB
+    M --> PS
+    S1 --> MO
+    TR -.训练时.-> PS
+
+    style Serving fill:#cde7f0,stroke:#4a90b8
+    style Core fill:#d4edda,stroke:#2e7d32
+    style Infra fill:#fff3cd,stroke:#b8860b
+```
+
+### 训练流水线
+
+```mermaid
+flowchart LR
+    A[数据加载<br/>raw parquet] --> B[Stage1 Clean<br/>缺失/异常/类型修复]
+    B --> C[Stage2 Features<br/>12 类特征工程]
+    C --> D[Stage3 筛选<br/>IV + VIF 去共线性]
+    D --> E[Stage4 训练<br/>LightGBM / XGBoost / CatBoost]
+    E --> F[Stage5 评估<br/>AUC · KS · PR-AUC · SHAP]
+    F --> G[Stage6 阈值优化<br/>成本加权]
+    G --> H[模型制品导出<br/>pipeline.pkl + .joblib]
+
+    subgraph Storage[存储层]
+        FS[Feature Store<br/>SQLite 版本+血缘]
+        ML[MLflow<br/>实验+模型注册]
+        ART[artifacts/<br/>按 run_id 归档]
+    end
+
+    C --> FS
+    F --> ML
+    H --> ART
+
+    style A fill:#f1f3f5
+    style H fill:#cde7f0,stroke:#4a90b8
+```
 
 ---
 

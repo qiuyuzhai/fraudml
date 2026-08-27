@@ -1,0 +1,77 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+*.whl
+
+# === 虚拟环境 ===
+.venv/
+venv/
+env/
+ENV/
+
+# === 测试 / 缓存 ===
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+
+# === 环境变量 ===
+.env
+.env.*
+!.env.example
+
+# === IDE / 编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# === Jupyter ===
+*.ipynb_checkpoints
+
+# === 项目特有：数据（体量大，不上传） ===
+data/raw/
+*.parquet
+*.csv
+!data/blacklist.txt
+
+# === 项目特有：训练产物 ===
+artifacts/
+outputs/
+
+# === 项目特有：模型/序列化文件 ===
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.safetensors
+
+# === 项目特有：MLflow / 特征存储 ===
+mlflow.db
+feature_store.db
+.mlflow/
+
+# === 日志 ===
+*.log
+logs/
+
+# === 系统临时文件 ===
+tmp/
+temp/
