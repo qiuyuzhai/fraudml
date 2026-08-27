@@ -1,4 +1,4 @@
-# FraudML — E-Commerce Fraud Detection System
+# FraudML — 电商欺诈检测系统
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![LightGBM](https://img.shields.io/badge/LightGBM-3.3-green)
@@ -11,202 +11,202 @@
 
 ---
 
-## Results
+## 实验结果
 
-| Config | AUC | KS | PR-AUC | Prec@5% | Features | Notes |
-|--------|-----|-----|--------|---------|----------|-------|
-| **Hybrid (best)** | **0.8942** | **0.6265** | 0.5131 | 0.3812 | 1503 | Raw cols + Time + Amount features |
-| Baseline (no FE) | 0.8939 | 0.6288 | 0.5153 | 0.3843 | 1494 | Raw columns only, no engineering |
-| Default (strict IV) | 0.8348 | 0.5273 | 0.4384 | 0.3387 | 258 | Full FE + IV > 0.005 filter |
-| Full config | 0.8237 | 0.5192 | 0.4360 | 0.3385 | 293 | All features + 5-model comparison |
+| 配置 | AUC | KS | PR-AUC | Prec@5% | 特征数 | 说明 |
+|------|-----|-----|--------|---------|--------|------|
+| **Hybrid（最佳）** | **0.8942** | **0.6265** | 0.5131 | 0.3812 | 1503 | 原始列 + 时间 + 金额特征 |
+| 基线（无特征工程） | 0.8939 | 0.6288 | 0.5153 | 0.3843 | 1494 | 仅使用原始列，无特征工程 |
+| 默认（严格 IV 筛选） | 0.8348 | 0.5273 | 0.4384 | 0.3387 | 258 | 完整特征工程 + IV > 0.005 筛选 |
+| 完整配置 | 0.8237 | 0.5192 | 0.4360 | 0.3385 | 293 | 全部特征 + 5 模型对比 |
 
-**Key finding**: For tree-based models, 99% of predictive power comes from raw columns. Most handcrafted features (TargetEncoder, CrossFeature, HistoryFeature) add noise rather than signal. Only "transformations trees can't learn" (time periodicity, log scaling) provide marginal gains.
+**核心发现**：基于树的模型中，99% 的预测能力来自原始列。多数手工构造的特征（TargetEncoder、CrossFeature、HistoryFeature）引入的是噪声而非信号。只有「树模型无法学习的变换」（时间周期性、对数缩放）能带来微弱收益。
 
 ---
 
-## Architecture
+## 架构
 
 ```
-Transaction Request
-       │
-       ▼
+交易请求
+    │
+    ▼
 ┌───────────────────────────────────────┐
-│  Layer 1: Rule Engine (millisecond)   │
-│  · Blacklist match     → BLOCK        │   ← Hits directly block,
-│  · Velocity check      → CHALLENGE    │   ← no model call needed
-│  · Amount threshold    → CHALLENGE    │
+│  第一层：规则引擎（毫秒级）              │
+│  · 命中黑名单     → 拦截 (BLOCK)       │   ← 命中直接拦截，
+│  · 速度异常检测   → 校验 (CHALLENGE)   │   ← 无需调用模型
+│  · 金额阈值       → 校验 (CHALLENGE)   │
 └──────────────┬────────────────────────┘
-               │ PASS (no rule hit)
+               │ 通过（无规则命中）
                ▼
 ┌───────────────────────────────────────┐
-│  Layer 2: ML Model (LightGBM)         │
-│  · Feature pipeline (degraded mode)   │
-│  · predict_proba → probability         │
-│  · Three-tier risk: LOW / MED / HIGH  │
+│  第二层：ML 模型（LightGBM）            │
+│  · 特征管道（降级模式）                 │
+│  · predict_proba → 输出概率            │
+│  · 三级风险：低 / 中 / 高              │
 └──────────────┬────────────────────────┘
                │
                ▼
-        allow / challenge_step_up / block_and_review
+        放行 / 升级校验 / 拦截并人工审核
 ```
 
-**Degraded mode**: Stateful features (HistoryFeature, AggregationFeature) require Redis for real-time historical context. When Redis is unavailable, the service flags `features_degraded=true` and scores with available stateless features only.
+**降级模式**：有状态特征（HistoryFeature、AggregationFeature）需要 Redis 提供实时历史上下文。当 Redis 不可用时，服务会标记 `features_degraded=true`，仅使用可用的无状态特征进行打分。
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
-# 1. Install
+# 1. 安装
 pip install -e ".[dev]"
 
-# 2. Train (default config)
+# 2. 训练（默认配置）
 python -m src.train --config-name config_hybrid
 
-# 3. Start online service
+# 3. 启动在线服务
 export MODEL_ARTIFACT_DIR=artifacts/run_YYYYMMDD_HHMMSS_xxxxxx
 uvicorn src.serving.main:app --port 8000
 
-# 4. Score a transaction
+# 4. 对单笔交易打分
 curl -X POST http://localhost:8000/score \
   -H "Content-Type: application/json" \
   -d '{"TransactionDT": 3459432, "TransactionAmt": 50, "card1": 17074}'
 
-# 5. Batch scoring
+# 5. 批量打分
 fraudml-score --artifact-dir artifacts/run_xxx --data-source data/raw/train_transaction.parquet
 
-# 6. Run tests
+# 6. 运行测试
 pytest
 ```
 
 ### Docker
 
 ```bash
-# Training
+# 训练
 docker compose --profile training up training
 
-# Online API
+# 在线 API
 docker compose --profile api up api
 
-# MLflow tracking server
+# MLflow 追踪服务
 docker compose --profile mlflow up mlflow
 ```
 
 ---
 
-## Key Design Decisions
+## 核心设计决策
 
-### 1. Data Leakage Repair
+### 1. 数据泄漏修复
 
-Stateful features (TargetEncoder, HistoryFeature, AggregationFeature) must `fit()` on train only and `transform()` on validation. The initial run had train+val concatenated before fitting, leaking future statistics and labels:
+有状态特征（TargetEncoder、HistoryFeature、AggregationFeature）必须仅在训练集上 `fit()`，然后在验证集上 `transform()`。初始版本错误地将训练集+验证集拼接后进行拟合，导致未来的统计量和标签泄漏：
 
-| | AUC (leaked) | AUC (fixed) | Delta |
+| | AUC（泄漏） | AUC（修复后） | 差值 |
 |---|---|---|---|
-| Initial run | 0.9079 | 0.8939 | -0.014 |
+| 初始运行 | 0.9079 | 0.8939 | -0.014 |
 
-The 1.4% AUC drop is itself proof that leakage existed.
+AUC 下降 1.4% 本身就是泄漏存在的证明。
 
-### 2. Feature Engineering Evaluation
+### 2. 特征工程评估
 
-| Feature Type | Effect on LightGBM | Why |
+| 特征类型 | 对 LightGBM 的影响 | 原因 |
 |---|---|---|
-| TimeFeature (hour/weekday) | +0.0003 | Trees can't extract periodicity from raw timestamp |
-| AmountFeature (log/decimal) | +0.0001 | Log transform helps split points |
-| TargetEncoder | -0.01 | Redundant for trees; leakage risk |
-| CrossFeature | -0.005 | Trees already learn interactions |
-| HistoryFeature | -0.01 | Sparse (74% of UIDs appear once) |
+| TimeFeature（小时/星期） | +0.0003 | 树模型无法从原始时间戳中提取周期性 |
+| AmountFeature（对数/小数） | +0.0001 | 对数变换有助于确定分裂点 |
+| TargetEncoder | -0.01 | 对树模型冗余；存在泄漏风险 |
+| CrossFeature | -0.005 | 树模型已能学习特征交互 |
+| HistoryFeature | -0.01 | 稀疏（74% 的 UID 仅出现一次） |
 
-**Takeaway**: Don't blindly add features. For tree models, evaluate each feature's incremental value — most "standard" feature engineering techniques are designed for linear models and can hurt tree performance.
+**结论**：不要盲目添加特征。对于树模型，需评估每个特征的增量价值——多数「标准」特征工程技术是为线性模型设计的，反而会损害树模型的性能。
 
-### 3. Rules + Model Two-Tier
+### 3. 规则 + 模型双层架构
 
-Real fraud systems use deterministic rules before ML scoring:
-- **Rules** (millisecond): blacklist, velocity, amount threshold — catch obvious fraud without model latency
-- **Model** (100-200ms): LightGBM handles the "gray zone" where rules don't fire
+真实的反欺诈系统会在 ML 打分前使用确定性规则：
+- **规则**（毫秒级）：黑名单、速度异常、金额阈值 —— 在无需模型延迟的情况下拦截明显欺诈
+- **模型**（100-200ms）：LightGBM 处理规则无法覆盖的「灰色地带」
 
-The `/score` endpoint returns `decision_source: "rule_engine" | "model"` to make the decision path transparent.
+`/score` 端点返回 `decision_source: "rule_engine" | "model"`，使决策路径可追溯。
 
-### 4. Cost-Optimized Three-Tier Risk
+### 4. 成本优化的三级风险
 
-Thresholds are not hardcoded — they're optimized on validation data using business cost weights:
+阈值并非硬编码 —— 它们基于业务成本权重在验证数据上进行优化：
 
 ```yaml
 risk_decision:
-  cost_fp: 10.0    # False positive cost (customer friction)
-  cost_fn: 500.0   # False negative cost (fraud loss)
+  cost_fp: 10.0    # 误报成本（客户体验摩擦）
+  cost_fn: 500.0   # 漏报成本（欺诈损失）
 ```
 
-With a 50:1 cost ratio, the optimizer pushes thresholds low (medium=0.01, high=0.03), reflecting "better to over-block than miss fraud" — the correct trade-off for high-value fraud.
+基于 50:1 的成本比，优化器会将阈值压低（中风险=0.01，高风险=0.03），体现「宁可多拦截也不漏掉欺诈」的原则 —— 这对高价值欺诈是正确的权衡。
 
-### 5. Online Degraded Mode
+### 5. 在线降级模式
 
-Stateful features need historical context (Redis sorted sets for transaction windows). Without Redis, the service still scores but sets `features_degraded=true`, so callers know the probability is from a partial feature set. This enables progressive deployment: ship the model first, add Redis later.
+有状态特征需要历史上下文（Redis 有序集合存储交易窗口）。即便没有 Redis，服务仍可打分，但会标记 `features_degraded=true`，让调用方知晓概率是基于部分特征集得出的。这支持渐进式部署：先上线模型，后续再接入 Redis。
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 fraudml/
 ├── configs/
-│   ├── config.yaml              # Default (strict IV, minimal FE)
-│   ├── config_hybrid.yaml       # Time+Amount features (best AUC)
-│   ├── config_full.yaml         # All features + model comparison
-│   └── config_baseline.yaml    # No feature engineering
+│   ├── config.yaml              # 默认（严格 IV，最小特征工程）
+│   ├── config_hybrid.yaml       # 时间+金额特征（最佳 AUC）
+│   ├── config_full.yaml         # 全部特征 + 模型对比
+│   └── config_baseline.yaml    # 无特征工程
 ├── data/
-│   ├── raw/                     # IEEE-CIS parquet files
-│   └── blacklist.txt            # High-fraud card1 values
+│   ├── raw/                     # IEEE-CIS parquet 文件
+│   └── blacklist.txt            # 高欺诈 card1 值
 ├── src/
-│   ├── data/                    # DataLoader, PolarsDataLoader, make_loader()
-│   ├── features/                # FeatureBase ABC + 12 feature classes
-│   ├── models/                  # ModelBase ABC + LightGBM/XGBoost/CatBoost wrappers
-│   │   └── risk_decision.py     # Three-tier risk engine
-│   ├── pipeline/                # TrainPipeline, FraudPredictor
-│   ├── persistence/             # ModelSerializer (artifact save/load)
+│   ├── data/                    # DataLoader、PolarsDataLoader、make_loader()
+│   ├── features/                # FeatureBase 抽象类 + 12 个特征类
+│   ├── models/                  # ModelBase 抽象类 + LightGBM/XGBoost/CatBoost 封装
+│   │   └── risk_decision.py     # 三级风控引擎
+│   ├── pipeline/                # TrainPipeline、FraudPredictor
+│   ├── persistence/             # ModelSerializer（模型制品保存/加载）
 │   ├── tracker/                 # MLflow ExperimentTracker
-│   ├── feature_store/           # SQLite-backed feature store (versioning + lineage)
-│   ├── serving/                 # FastAPI app + config + schemas
-│   ├── rules/                   # RuleEngine (Blacklist/Velocity/Amount)
+│   ├── feature_store/           # SQLite 特征存储（版本管理 + 血缘追踪）
+│   ├── serving/                 # FastAPI 应用 + 配置 + Schema
+│   ├── rules/                   # RuleEngine（Blacklist/Velocity/Amount）
 │   ├── interpretability/        # SHAPExplainer
-│   ├── batch_score.py           # Batch scoring CLI
-│   └── train.py                 # Training entry point
-├── tests/                       # 32 pytest tests
-├── Dockerfile                   # Multi-stage build (builder + runtime)
-├── docker-compose.yml           # training + mlflow + api services
-├── pyproject.toml               # PEP 621 standard
+│   ├── batch_score.py           # 批量打分 CLI
+│   └── train.py                 # 训练入口
+├── tests/                       # 32 个 pytest 测试
+├── Dockerfile                   # 多阶段构建（构建器 + 运行时）
+├── docker-compose.yml           # training + mlflow + api 服务
+├── pyproject.toml               # PEP 621 标准
 └── README.md
 ```
 
 ---
 
-## Configuration
+## 配置
 
-| Config | Feature Engineering | IV Filter | AUC |
-|--------|---------------------|-----------|-----|
-| `config_baseline` | None (raw cols only) | No | 0.8939 |
-| `config_hybrid` | Time + Amount | No | **0.8942** |
-| `config` | Full FE (12 steps) | > 0.005 | 0.8348 |
-| `config_full` | Full FE + model comparison | > 0.0 | 0.8237 |
+| 配置 | 特征工程 | IV 筛选 | AUC |
+|------|----------|---------|-----|
+| `config_baseline` | 无（仅原始列） | 否 | 0.8939 |
+| `config_hybrid` | 时间 + 金额 | 否 | **0.8942** |
+| `config` | 完整特征工程（12 步） | > 0.005 | 0.8348 |
+| `config_full` | 完整特征工程 + 模型对比 | > 0.0 | 0.8237 |
 
 ```bash
-# Switch config
+# 切换配置
 python -m src.train --config-name config_hybrid
 ```
 
 ---
 
-## API Endpoints
+## API 接口
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/score` | Score a transaction (rules → model) |
-| POST | `/explain` | Score + SHAP top features |
-| GET | `/health` | Liveness probe |
-| GET | `/ready` | Readiness probe (model + feature store) |
-| GET | `/model-info` | Model type, features, metrics |
-| GET | `/rules` | List active pre-model rules |
-| POST | `/admin/blacklist` | Add card1 to blacklist |
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/score` | 对交易打分（规则 → 模型） |
+| POST | `/explain` | 打分 + SHAP 关键特征 |
+| GET | `/health` | 存活探针 |
+| GET | `/ready` | 就绪探针（模型 + 特征存储） |
+| GET | `/model-info` | 模型类型、特征、指标 |
+| GET | `/rules` | 列出模型前的活跃规则 |
+| POST | `/admin/blacklist` | 将 card1 加入黑名单 |
 
-### Example Response
+### 响应示例
 
 ```json
 {
@@ -223,15 +223,15 @@ python -m src.train --config-name config_hybrid
 
 ---
 
-## Testing
+## 测试
 
 ```bash
 pytest -v
-# 32 tests: features, feature_store, data, pipeline, serving
+# 32 个测试：features、feature_store、data、pipeline、serving
 ```
 
 ---
 
-## Dataset
+## 数据集
 
-[IEEE-CIS Fraud Detection](https://www.kaggle.com/competitions/ieee-fraud-detection/) — 590,540 transactions × 394 columns from Vesta's e-commerce platform. Train/validation split by time (80/20) to prevent temporal leakage.
+[IEEE-CIS Fraud Detection](https://www.kaggle.com/competitions/ieee-fraud-detection/) —— 来自 Vesta 电商平台的 590,540 笔交易 × 394 列。按时间划分训练/验证集（80/20）以防止时间泄漏。
